@@ -66,14 +66,15 @@ title 和 focus 文字内部如果需要引用或强调，**一律使用中文�
  * @param {object} episode
  * @param {Array} characters
  * @param {(p:{phase:string,current?:number,total?:number})=>void} [onProgress]
+ * @param {{ resume?: object, onCheckpoint?: (cp:object)=>Promise<void>|void }} [opts]
  */
-export async function generateEpisodeScript(episode, characters, onProgress = () => {}) {
+export async function generateEpisodeScript(episode, characters, onProgress = () => {}, opts = {}) {
   const count = sectionCountFor(episode.durationMinutes);
-  if (count <= 1) {
+  if (count <= 1 && !opts.resume?.outline) {
     onProgress({ phase: "single" });
     return generateScript(episode, characters);
   }
-  return generateScriptSegmented(episode, characters, count, onProgress);
+  return generateScriptSegmented(episode, characters, count, onProgress, opts);
 }
 
 // --- Single-pass ---
@@ -105,21 +106,37 @@ export async function generateScript(episode, characters) {
 }
 
 // --- Segmented (outline + per-section) ---
-async function generateScriptSegmented(episode, characters, sectionCount, onProgress) {
+async function generateScriptSegmented(episode, characters, sectionCount, onProgress, opts = {}) {
   const model = episode.model || process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
   const { byId, roster } = buildRoster(episode, characters);
   const targetWords = Math.max(1, Number(episode.durationMinutes) || 10) * wordsPerMinute();
+  const onCheckpoint = typeof opts.onCheckpoint === "function" ? opts.onCheckpoint : async () => {};
+  const resume = opts.resume || null;
 
-  onProgress({ phase: "outline", total: sectionCount });
-  const outline = await generateOutline(episode, roster, sectionCount, targetWords, model);
+  let outline = resume?.outline || null;
+  const allSegments = Array.isArray(resume?.segments) ? [...resume.segments] : [];
+  let startIndex = Math.max(0, Number(resume?.nextSectionIndex) || 0);
+  let truncated = false;
+
+  if (!outline) {
+    onProgress({ phase: "outline", total: sectionCount });
+    outline = await generateOutline(episode, roster, sectionCount, targetWords, model);
+    startIndex = 0;
+    await onCheckpoint({
+      outline,
+      segments: [],
+      nextSectionIndex: 0,
+      sectionCount: outline.sections.length,
+      scriptTitle: outline.title || episode.title,
+    });
+  }
+
   const sections = outline.sections;
   const perSection = Math.max(200, Math.round(targetWords / sections.length));
+  let tail = allSegments.slice(-4).map((s) => s.text).join("\n");
+  if (tail.length > 1500) tail = tail.slice(-1500);
 
-  const allSegments = [];
-  let truncated = false;
-  let tail = "";
-
-  for (let i = 0; i < sections.length; i++) {
+  for (let i = startIndex; i < sections.length; i++) {
     onProgress({ phase: "section", current: i + 1, total: sections.length });
     const { segments, truncated: t } = await generateSection(episode, roster, byId, {
       outline,
@@ -133,6 +150,14 @@ async function generateScriptSegmented(episode, characters, sectionCount, onProg
     truncated = truncated || t;
     tail = allSegments.slice(-4).map((s) => s.text).join("\n");
     if (tail.length > 1500) tail = tail.slice(-1500);
+
+    await onCheckpoint({
+      outline,
+      segments: allSegments,
+      nextSectionIndex: i + 1,
+      sectionCount: sections.length,
+      scriptTitle: outline.title || episode.title,
+    });
   }
 
   return { title: outline.title || episode.title, segments: allSegments, truncated };

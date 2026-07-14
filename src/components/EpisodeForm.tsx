@@ -7,6 +7,7 @@ const EMPTY: EpisodeDraft = {
   title: "",
   topic: "",
   materials: "",
+  materialLinks: "",
   durationMinutes: 10,
   hostId: "",
   guestIds: [],
@@ -43,6 +44,7 @@ export function EpisodeForm({
         title,
         topic,
         materials,
+        materialLinks: editing.materialLinks || "",
         durationMinutes,
         hostId,
         guestIds,
@@ -124,9 +126,19 @@ export function EpisodeForm({
       </label>
 
       <label>
-        参考材料（AI 创作时必须用到）
+        参考材料（文字要点、数据、观点等）
         <textarea value={draft.materials} onChange={(e) => set("materials", e.target.value)} rows={4}
           placeholder="粘贴要点、数据、事实、观点素材……" />
+      </label>
+
+      <label>
+        参考链接（每行一个，写稿前自动抓取正文）
+        <textarea
+          value={draft.materialLinks}
+          onChange={(e) => set("materialLinks", e.target.value)}
+          rows={3}
+          placeholder={"https://example.com/article\nhttps://www.reddit.com/r/.../comments/..."}
+        />
       </label>
 
       {priorOptions.length > 0 && (

@@ -10,7 +10,8 @@
 import { GoogleGenAI } from "@google/genai";
 
 const DEFAULT_BASE = "https://generativelanguage.googleapis.com";
-const MATERIALS_SNIPPET_MAX = 3000;
+const MATERIALS_SNIPPET_MAX = 12000;
+const MAX_MATERIAL_URLS = 20;
 
 const DEEP_AGENTS = {
   deep_research: "deep-research-preview-04-2026",
@@ -49,10 +50,24 @@ export function buildSearchContext(ctx = {}) {
   if (topic) parts.push(`主题：${topic}`);
   if (searchBrief) parts.push(`调研需求：${searchBrief}`);
   if (materials) {
-    const snip =
-      materials.length > MATERIALS_SNIPPET_MAX
-        ? materials.slice(0, MATERIALS_SNIPPET_MAX) + "\n……（已有材料过长，已截断）"
-        : materials;
+    let snip = materials;
+    if (materials.length > MATERIALS_SNIPPET_MAX) {
+      const marker = "## 链接自动抓取";
+      const idx = materials.indexOf(marker);
+      if (idx >= 0) {
+        // Keep some original text + prefer the fetched-link digests.
+        const head = materials.slice(0, Math.min(idx, 2000));
+        const digests = materials.slice(idx);
+        snip =
+          (head.length < idx ? head + "\n……（原文过长已截断）\n\n" : head) +
+          digests.slice(0, MATERIALS_SNIPPET_MAX - 2500);
+        if (digests.length > MATERIALS_SNIPPET_MAX - 2500) {
+          snip += "\n……（链接摘要过长已截断）";
+        }
+      } else {
+        snip = materials.slice(0, MATERIALS_SNIPPET_MAX) + "\n……（已有材料过长，已截断）";
+      }
+    }
     parts.push(`已有参考材料（请在此基础上补充、核实、扩展，避免简单重复）：\n${snip}`);
   }
   return parts.join("\n\n");
@@ -89,6 +104,156 @@ function deepResearchPrompt(context) {
 function promptForMode(searchMode, context) {
   if (searchMode === "google") return googleSearchPrompt(context);
   return deepResearchPrompt(context);
+}
+
+/**
+ * Pull http(s) URLs from free-form materials text (max MAX_MATERIAL_URLS).
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function extractUrlsFromText(text) {
+  const raw = String(text || "");
+  const re = /https?:\/\/[^\s)\]>"'<>]+/gi;
+  const urls = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    let url = m[0].replace(/[.,;:!?）】》」』]+$/u, "");
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      url = u.href;
+    } catch {
+      continue;
+    }
+    if (seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+    if (urls.length >= MAX_MATERIAL_URLS) break;
+  }
+  return urls;
+}
+
+/**
+ * Collect unique URLs from materials text and the dedicated links field.
+ * @param {string} materials
+ * @param {string} [materialLinks]
+ */
+export function collectMaterialUrls(materials, materialLinks = "") {
+  const fromMaterials = extractUrlsFromText(materials);
+  const fromLinks = extractUrlsFromText(materialLinks);
+  const seen = new Set();
+  const urls = [];
+  for (const url of [...fromLinks, ...fromMaterials]) {
+    if (seen.has(url)) continue;
+    seen.add(url);
+    urls.push(url);
+    if (urls.length >= MAX_MATERIAL_URLS) break;
+  }
+  return urls;
+}
+
+/**
+ * Fetch URLs from materials + materialLinks via Gemini url_context, append digests.
+ * @param {string|{ materials?: string, materialLinks?: string }} input
+ * @returns {Promise<{ materials: string, fetched: Array<{title:string,url:string}>, failed: string[] }>}
+ */
+export async function expandMaterialsLinks(input) {
+  const original = typeof input === "string" ? String(input || "") : String(input?.materials || "");
+  const materialLinks = typeof input === "string" ? "" : String(input?.materialLinks || "");
+  const urls = collectMaterialUrls(original, materialLinks);
+  if (urls.length === 0) {
+    return { materials: original, fetched: [], failed: [] };
+  }
+
+  const apiKey = requireApiKey();
+  const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+  const list = urls.map((u, i) => `${i + 1}. ${u}`).join("\n");
+  const prompt =
+    `请使用 URL 上下文工具打开下面每一个链接，读取页面（含帖子正文与主要评论/讨论，若有）。\n` +
+    `对每个链接输出一节，严格按此格式（用中文）：\n\n` +
+    `### 链接 N\n` +
+    `URL: <原样 URL>\n` +
+    `状态: 成功 或 失败\n` +
+    `标题: <页面标题，失败可写未知>\n` +
+    `内容摘要:\n` +
+    `<成功时：保留关键论点、事实、有代表性的原话；失败时：简短说明原因>\n\n` +
+    `不要编造打不开的页面内容。链接列表：\n${list}`;
+
+  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      tools: [{ url_context: {} }],
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`参考材料链接抓取失败 (${res.status}): ${detail.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const cand = data?.candidates?.[0];
+  const text = (cand?.content?.parts || [])
+    .map((p) => p?.text || "")
+    .join("")
+    .trim();
+
+  const metaList =
+    cand?.urlContextMetadata?.urlMetadata ||
+    cand?.url_context_metadata?.url_metadata ||
+    [];
+  const fetched = [];
+  const failed = [];
+  const seenFetch = new Set();
+
+  for (const meta of metaList) {
+    const url = meta.retrievedUrl || meta.retrieved_url || "";
+    const status = String(meta.urlRetrievalStatus || meta.url_retrieval_status || "");
+    if (!url) continue;
+    if (/SUCCESS/i.test(status)) {
+      if (!seenFetch.has(url)) {
+        seenFetch.add(url);
+        fetched.push({ title: url, url });
+      }
+    } else if (!failed.includes(url)) {
+      failed.push(url);
+    }
+  }
+  for (const url of urls) {
+    if (!seenFetch.has(url) && !failed.includes(url) && text) {
+      // Metadata incomplete but model returned text — treat as fetched for UI.
+      fetched.push({ title: url, url });
+      seenFetch.add(url);
+    } else if (!seenFetch.has(url) && !failed.includes(url) && !text) {
+      failed.push(url);
+    }
+  }
+
+  if (!text) {
+    const note =
+      `## 链接自动抓取\n（未能从以下链接提取正文，写稿时请仅把 URL 当线索，勿假装已读：）\n` +
+      urls.map((u) => `- ${u}`).join("\n");
+    return {
+      materials: original ? `${original}\n\n${note}` : note,
+      fetched: [],
+      failed: urls,
+    };
+  }
+
+  const block = `## 链接自动抓取（写稿须优先依据下列正文，而非仅 URL）\n${text}`;
+  return {
+    materials: original ? `${original}\n\n${block}` : block,
+    fetched,
+    failed,
+  };
 }
 
 /**

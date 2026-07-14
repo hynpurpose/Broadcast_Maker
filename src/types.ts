@@ -33,6 +33,20 @@ export interface Script {
 
 export type EpisodeStatus = "draft" | "script_ready";
 
+/** Mid-generation snapshot — survives restarts; used to resume. */
+export interface GenCheckpoint {
+  materials: string;
+  searchSources: SearchSource[];
+  urlsFetched: boolean;
+  searchDone: boolean;
+  outline?: { title?: string; sections: Array<{ title: string; focus: string }> };
+  segments: ScriptSegment[];
+  nextSectionIndex: number;
+  sectionCount: number;
+  scriptTitle?: string;
+  updatedAt: string;
+}
+
 /** 联网搜索模式：关闭 / 普通 Google Search / Deep Research / Deep Research Max */
 export type SearchMode = "off" | "google" | "deep_research" | "deep_research_max";
 
@@ -42,10 +56,12 @@ export interface SearchSource {
 }
 
 export interface GenProgress {
-  phase: "search" | "outline" | "section" | "single" | "done" | "error";
+  phase: "fetch_urls" | "search" | "outline" | "section" | "single" | "done" | "error";
   current?: number;
   total?: number;
   error?: string;
+  /** server heartbeat; used to detect stale/orphan jobs */
+  updatedAt?: string;
 }
 
 export interface Episode {
@@ -53,6 +69,8 @@ export interface Episode {
   title: string;
   topic: string;
   materials: string;
+  /** 参考链接，每行一个 URL（写稿前自动抓取） */
+  materialLinks: string;
   durationMinutes: number;
   hostId: string;
   guestIds: string[];
@@ -63,6 +81,8 @@ export interface Episode {
   /** 可选：联网/深研时想查清什么、关注角度等 */
   searchBrief: string;
   searchSources?: SearchSource[];
+  /** 未完成的生成检查点（有则可续跑） */
+  genCheckpoint?: GenCheckpoint | null;
   /** 基于哪些往期节目的内容来延续创作 */
   basedOnEpisodeIds: string[];
   status: EpisodeStatus;
@@ -95,6 +115,7 @@ export type EpisodeDraft = Pick<
   | "title"
   | "topic"
   | "materials"
+  | "materialLinks"
   | "durationMinutes"
   | "hostId"
   | "guestIds"

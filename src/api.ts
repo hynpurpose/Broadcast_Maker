@@ -55,11 +55,33 @@ export const api = {
       if (!r.ok) throw new Error(r.statusText);
     }),
 
-  /** Starts generation (returns immediately; poll getGenProgress for completion). */
-  startGenerate: (id: string) =>
-    fetch(`/api/episodes/${id}/generate-script`, { method: "POST" }).then(async (r) => {
-      if (!r.ok) throw new Error((await r.text()) || "启动生成失败");
-    }),
+  /** Starts generation (returns immediately; poll getGenProgress for completion).
+   *  force=true discards checkpoint and restarts from scratch.
+   *  If already running, resolves with { busy: true, progress } so UI can re-attach polling. */
+  startGenerate: async (id: string, opts: { force?: boolean } = {}) => {
+    const r = await fetch(`/api/episodes/${id}/generate-script`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    const body = await r.json().catch(() => ({} as Record<string, unknown>));
+    if (r.status === 409 && (body as { busy?: boolean })?.busy) {
+      return {
+        busy: true as const,
+        progress: ((body as { progress?: GenProgress }).progress || null) as GenProgress | null,
+      };
+    }
+    if (!r.ok) {
+      const err = (body as { error?: string })?.error;
+      throw new Error(err || "启动生成失败");
+    }
+    return {
+      busy: false as const,
+      started: true as const,
+      resumed: Boolean((body as { resumed?: boolean })?.resumed),
+      progress: null as GenProgress | null,
+    };
+  },
 
   getGenProgress: (id: string) =>
     fetch(`/api/episodes/${id}/gen-progress`).then((r) => json<GenProgress | null>(r)),

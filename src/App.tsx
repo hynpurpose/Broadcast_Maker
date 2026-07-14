@@ -76,7 +76,7 @@ export function App() {
             {characters.length === 0 && <p className="muted">还没有角色，先创建一个。</p>}
             <ul className="char-list">
               {characters.map((c) => (
-                <li key={c.id} className="char-card-container">
+                <li key={c.id} className={"char-card-container" + (editing?.id === c.id ? " active" : "")}>
                   <div className={"char-card" + (editing?.id === c.id ? " active" : "")}>
                     {/* Card Header Row */}
                     <div className="char-card-header">

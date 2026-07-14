@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import type { Character, Episode, EpisodeDraft, GenProgress, SearchMode } from "../types";
 import { api } from "../api";
 import { SCRIPT_MODELS, SEARCH_MODES } from "../constants";
@@ -23,6 +23,24 @@ function searchBadge(mode: SearchMode): string | null {
   return "🔬 Deep Research Max";
 }
 
+function hasResumableCheckpoint(e: Episode | null): boolean {
+  const cp = e?.genCheckpoint;
+  if (!cp) return false;
+  return Boolean(cp.outline || cp.searchDone || cp.urlsFetched || (cp.segments && cp.segments.length > 0));
+}
+
+function checkpointHint(e: Episode): string {
+  const cp = e.genCheckpoint!;
+  if (cp.outline) {
+    const done = cp.nextSectionIndex || 0;
+    const total = cp.sectionCount || "?";
+    return `已完成 ${done}/${total} 段，可继续`;
+  }
+  if (cp.searchDone) return "调研已完成，可从写大纲继续";
+  if (cp.urlsFetched) return "链接已抓取，可继续";
+  return "有未完成进度，可继续";
+}
+
 export function EpisodesPanel({ characters }: { characters: Character[] }) {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [editing, setEditing] = useState<Episode | null>(null);
@@ -30,6 +48,45 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<GenProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function stopPolling() {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  function startPolling(id: string) {
+    stopPolling();
+    setGeneratingId(id);
+    pollRef.current = setInterval(async () => {
+      let p: GenProgress | null;
+      try {
+        p = await api.getGenProgress(id);
+      } catch {
+        return;
+      }
+      if (!p) return;
+      if (p.phase === "done") {
+        stopPolling();
+        await refresh();
+        setSelectedId(id);
+        setGeneratingId(null);
+        setProgress(null);
+      } else if (p.phase === "error") {
+        stopPolling();
+        setError(p.error || "生成失败");
+        setGeneratingId(null);
+        setProgress(null);
+        await refresh();
+      } else {
+        setProgress(p);
+      }
+    }, 1500);
+  }
+
+  useEffect(() => () => stopPolling(), []);
 
   async function refresh() {
     setEpisodes(await api.listEpisodes());
@@ -37,6 +94,28 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
   useEffect(() => {
     refresh();
   }, []);
+
+  // Re-attach to an in-flight server job when selecting an episode.
+  useEffect(() => {
+    if (!selectedId || generatingId === selectedId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const p = await api.getGenProgress(selectedId);
+        if (cancelled || !p) return;
+        if (p.phase !== "done" && p.phase !== "error") {
+          setProgress(p);
+          startPolling(selectedId);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when selection changes
+  }, [selectedId]);
 
   const selected = episodes.find((e) => e.id === selectedId) || null;
 
@@ -56,49 +135,45 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
     await api.deleteEpisode(id);
     if (selectedId === id) setSelectedId(null);
     if (editing?.id === id) setEditing(null);
+    if (generatingId === id) {
+      stopPolling();
+      setGeneratingId(null);
+      setProgress(null);
+    }
     refresh();
   }
 
-  async function handleGenerate(id: string) {
+  async function handleGenerate(id: string, force = false) {
     setError(null);
     setGeneratingId(id);
-    setProgress({ phase: "search" });
+    const ep = episodes.find((x) => x.id === id);
+    const cp = ep?.genCheckpoint;
+    setProgress(
+      cp?.outline
+        ? {
+            phase: "section",
+            current: Math.min((cp.nextSectionIndex || 0) + 1, cp.sectionCount || 1),
+            total: cp.sectionCount,
+          }
+        : { phase: "search" }
+    );
     try {
-      await api.startGenerate(id);
+      const result = await api.startGenerate(id, { force });
+      if (result.busy && result.progress) {
+        setProgress(result.progress);
+      }
+      startPolling(id);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
       setGeneratingId(null);
       setProgress(null);
-      return;
+      stopPolling();
     }
-    // Poll until the background job reports done or error.
-    const poll = setInterval(async () => {
-      let p: GenProgress | null;
-      try {
-        p = await api.getGenProgress(id);
-      } catch {
-        return; // transient; keep polling
-      }
-      if (!p) return;
-      if (p.phase === "done") {
-        clearInterval(poll);
-        await refresh();
-        setSelectedId(id);
-        setGeneratingId(null);
-        setProgress(null);
-      } else if (p.phase === "error") {
-        clearInterval(poll);
-        setError(p.error || "生成失败");
-        setGeneratingId(null);
-        setProgress(null);
-      } else {
-        setProgress(p);
-      }
-    }, 1500);
   }
 
   function progressText(p: GenProgress | null, mode?: SearchMode): string {
     if (!p) return "生成中…";
+    if (p.phase === "fetch_urls") return "抓取参考材料链接中…";
     if (p.phase === "search") {
       if (mode === "deep_research") return "Deep Research 调研中…";
       if (mode === "deep_research_max") return "Deep Research Max 调研中…";
@@ -156,6 +231,11 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
                   <div className="ep-info">
                     <h3 className="ep-title">{e.title || "（未命名节目）"}</h3>
                     <p className="ep-topic">{e.topic || "暂无主题描述"}</p>
+                    {hasResumableCheckpoint(e) && (
+                      <p className="ep-topic" style={{ color: "var(--accent, #c45)" }}>
+                        ⏸ {checkpointHint(e)}
+                      </p>
+                    )}
                     <div className="ep-meta">
                       <span className="ep-meta-item">
                         🤖 {e.model === "claude-opus-4-8" ? "Opus" : "Sonnet"}
@@ -199,21 +279,51 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
               <div className="gen-row">
                 <button
                   className="primary"
-                  onClick={() => handleGenerate(selected.id)}
+                  onClick={() => handleGenerate(selected.id, false)}
                   disabled={generatingId === selected.id}
                 >
                   {generatingId === selected.id
                     ? progressText(progress, episodeSearchMode(selected))
+                    : hasResumableCheckpoint(selected)
+                    ? "▶ 继续生成"
                     : selected.script
                     ? "↻ 重新生成脚本"
                     : "✦ 生成脚本"}
                 </button>
+                {hasResumableCheckpoint(selected) && generatingId !== selected.id && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm("将丢弃已保存的生成进度（含已写完的段落），从头重来？")) {
+                        handleGenerate(selected.id, true);
+                      }
+                    }}
+                  >
+                    从头重来
+                  </button>
+                )}
+                {!hasResumableCheckpoint(selected) && selected.script && generatingId !== selected.id && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (confirm("将清空当前脚本并重新生成？")) {
+                        handleGenerate(selected.id, true);
+                      }
+                    }}
+                  >
+                    从头重来
+                  </button>
+                )}
                 <span className="muted small">
                   {modelLabel(selected.model)}
                   {episodeSearchMode(selected) !== "off" &&
                     ` · ${searchModeLabel(episodeSearchMode(selected))}`}
+                  {hasResumableCheckpoint(selected) && ` · ${checkpointHint(selected)}`}
                 </span>
               </div>
+              {selected.status !== "script_ready" && selected.script?.segments?.length ? (
+                <p className="muted small">已保存部分脚本（{selected.script.segments.length} 句），可继续生成剩余段落。</p>
+              ) : null}
               {error && <p className="error">⚠ {error}</p>}
               {selected.searchSources && selected.searchSources.length > 0 && (
                 <div className="sources">

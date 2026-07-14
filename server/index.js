@@ -9,10 +9,32 @@ import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, 
 import { generateChatReplies } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
-import { gatherSearchMaterial } from "./gemini.js";
+import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls } from "./gemini.js";
+import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from "./checkpoint.js";
 
 // In-memory generation progress, keyed by episode id (for the poll endpoint).
 const genProgress = new Map();
+/** Monotonic job epoch per episode — stale async jobs must not write after a force restart. */
+const genJobEpoch = new Map();
+/** If a job stops heartbeating for this long, treat as dead and allow a new start. */
+const STALE_MS = 45 * 60 * 1000;
+
+function isActivePhase(phase) {
+  return phase && phase !== "done" && phase !== "error";
+}
+
+function touchProgress(id, patch) {
+  const next = { ...patch, updatedAt: new Date().toISOString() };
+  genProgress.set(id, next);
+  return next;
+}
+
+function isProgressStale(p) {
+  if (!p?.updatedAt) return true;
+  const t = Date.parse(p.updatedAt);
+  if (!Number.isFinite(t)) return true;
+  return Date.now() - t > STALE_MS;
+}
 
 // Load .env without a dependency (Node has no built-in dotenv loader in ESM).
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -80,12 +102,17 @@ app.post("/api/upload", async (req, res) => {
 // --- Episodes CRUD ---
 app.get("/api/episodes", async (_req, res) => {
   const episodes = await listEpisodes();
-  res.json(
-    episodes.map((e) => ({
-      ...e,
-      searchMode: resolveSearchMode(e),
-    }))
+  const withCp = await Promise.all(
+    episodes.map(async (e) => {
+      const diskCp = await loadCheckpoint(e.id);
+      return {
+        ...e,
+        searchMode: resolveSearchMode(e),
+        genCheckpoint: diskCp || e.genCheckpoint || null,
+      };
+    })
   );
+  res.json(withCp);
 });
 
 app.post("/api/episodes", async (req, res) => {
@@ -127,12 +154,14 @@ app.delete("/api/episodes/:id", async (req, res) => {
 // Kick off script generation. Long episodes generate segment-by-segment and can
 // take several minutes, so this returns immediately (202) and the work runs in
 // the background. The client polls /gen-progress until phase is "done"/"error".
+// Body: { force?: boolean } — force=true clears checkpoint and starts over.
 app.post("/api/episodes/:id/generate-script", async (req, res) => {
   const episodes = await listEpisodes();
   const idx = episodes.findIndex((e) => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: "not found" });
-  const episode = episodes[idx];
+  let episode = episodes[idx];
   const searchMode = resolveSearchMode(episode);
+  const force = Boolean(req.body?.force);
 
   const allCharacters = await listCharacters();
   const participantIds = new Set([episode.hostId, ...(episode.guestIds || [])].filter(Boolean));
@@ -141,67 +170,239 @@ app.post("/api/episodes/:id/generate-script", async (req, res) => {
   if (participants.length < 2) return res.status(400).json({ error: "至少需要主持人 + 1 位嘉宾" });
 
   const running = genProgress.get(episode.id);
-  if (running && running.phase !== "done" && running.phase !== "error") {
-    return res.status(409).json({ error: "该节目正在生成中" });
+  const busy = running && isActivePhase(running.phase);
+  const stale = busy && isProgressStale(running);
+
+  // Already running: tell client to re-attach polling (don't start a second job).
+  // force=true or a stale/orphan heartbeat: take over with a new job epoch.
+  if (busy && !force && !stale) {
+    return res.status(409).json({
+      error: "该节目正在生成中",
+      busy: true,
+      progress: running,
+    });
   }
 
-  const wantsSearch = searchMode !== "off";
-  genProgress.set(episode.id, { phase: wantsSearch ? "search" : "outline" });
-  res.status(202).json({ started: true });
+  const epoch = (genJobEpoch.get(episode.id) || 0) + 1;
+  genJobEpoch.set(episode.id, epoch);
+  const stillThisJob = () => genJobEpoch.get(episode.id) === epoch;
 
-  // Background job — does not use `res` after the 202 above.
+  if (force) {
+    await clearCheckpoint(episode.id);
+    episode = (await patchEpisodeFields(episode.id, { genCheckpoint: null })) || episode;
+  }
+
+  let cp = force ? null : (await loadCheckpoint(episode.id)) || episode.genCheckpoint || null;
+
+  const wantsSearch = searchMode !== "off";
+  const hasMaterialUrls =
+    collectMaterialUrls(episode.materials || "", episode.materialLinks || "").length > 0;
+
+  let initialPhase = "outline";
+  if (cp?.outline && cp.nextSectionIndex < (cp.sectionCount || Infinity)) {
+    initialPhase = "section";
+  } else if (cp?.searchDone || (cp?.urlsFetched && !wantsSearch)) {
+    initialPhase = "outline";
+  } else if (!cp?.urlsFetched && hasMaterialUrls) {
+    initialPhase = "fetch_urls";
+  } else if (!cp?.searchDone && wantsSearch) {
+    initialPhase = "search";
+  }
+  if (cp?.outline) {
+    touchProgress(episode.id, {
+      phase: "section",
+      current: Math.min((cp.nextSectionIndex || 0) + 1, cp.sectionCount || 1),
+      total: cp.sectionCount,
+    });
+  } else {
+    touchProgress(episode.id, { phase: initialPhase, total: cp?.sectionCount });
+  }
+
+  res.status(202).json({
+    started: true,
+    resumed: Boolean(cp?.outline || cp?.searchDone || cp?.urlsFetched),
+    tookOver: Boolean(busy && (force || stale)),
+  });
+
   (async () => {
     try {
-      let materials = episode.materials || "";
-      let searchSources = [];
-      if (wantsSearch) {
+      let materials = cp?.materials ?? episode.materials ?? "";
+      let searchSources = Array.isArray(cp?.searchSources)
+        ? [...cp.searchSources]
+        : Array.isArray(episode.searchSources)
+        ? [...episode.searchSources]
+        : [];
+      let urlsFetched = Boolean(cp?.urlsFetched);
+      let searchDone = Boolean(cp?.searchDone);
+
+      const persistCp = async (extra = {}) => {
+        if (!stillThisJob()) return;
+        cp = await saveCheckpoint(episode.id, {
+          materials,
+          searchSources,
+          urlsFetched,
+          searchDone,
+          outline: cp?.outline || null,
+          segments: Array.isArray(cp?.segments) ? cp.segments : [],
+          nextSectionIndex: cp?.nextSectionIndex || 0,
+          sectionCount: cp?.sectionCount || 0,
+          scriptTitle: cp?.scriptTitle || "",
+          ...extra,
+        });
+        await patchEpisodeFields(episode.id, {
+          genCheckpoint: {
+            materials: cp.materials,
+            searchSources: cp.searchSources,
+            urlsFetched: cp.urlsFetched,
+            searchDone: cp.searchDone,
+            outline: cp.outline,
+            segments: cp.segments,
+            nextSectionIndex: cp.nextSectionIndex,
+            sectionCount: cp.sectionCount,
+            scriptTitle: cp.scriptTitle,
+            updatedAt: cp.updatedAt,
+          },
+          searchSources: cp.searchSources,
+          ...(cp.segments?.length
+            ? {
+                script: {
+                  title: cp.scriptTitle || episode.title,
+                  segments: cp.segments,
+                },
+                status: "draft",
+              }
+            : {}),
+        });
+      };
+
+      const setProg = (p) => {
+        if (!stillThisJob()) return;
+        touchProgress(episode.id, p);
+      };
+
+      if (!urlsFetched && hasMaterialUrls) {
+        setProg({ phase: "fetch_urls" });
+        const expanded = await expandMaterialsLinks({
+          materials: episode.materials || "",
+          materialLinks: episode.materialLinks || "",
+        });
+        if (!stillThisJob()) return;
+        if (!cp?.materials || !String(cp.materials).includes("## 链接自动抓取")) {
+          materials = expanded.materials;
+        }
+        if (expanded.fetched.length) {
+          const seen = new Set(searchSources.map((s) => s.url));
+          for (const s of expanded.fetched) {
+            if (s.url && !seen.has(s.url)) {
+              seen.add(s.url);
+              searchSources.push(s);
+            }
+          }
+        }
+        urlsFetched = true;
+        await persistCp();
+      } else if (!urlsFetched) {
+        urlsFetched = true;
+        await persistCp();
+      }
+
+      if (!searchDone && wantsSearch) {
+        setProg({ phase: "search" });
         const found = await gatherSearchMaterial(
           {
             title: episode.title,
             topic: episode.topic,
             searchBrief: episode.searchBrief,
-            materials: episode.materials,
+            materials,
           },
           searchMode,
           () => {
-            genProgress.set(episode.id, { phase: "search" });
+            setProg({ phase: "search" });
           }
         );
-        searchSources = found.sources;
-        materials =
-          (materials ? materials + "\n\n" : "") + `## ${found.heading}\n${found.text}`;
+        if (!stillThisJob()) return;
+        const seen = new Set(searchSources.map((s) => s.url));
+        for (const s of found.sources || []) {
+          if (s.url && !seen.has(s.url)) {
+            seen.add(s.url);
+            searchSources.push(s);
+          }
+        }
+        if (!String(materials).includes(`## ${found.heading}`)) {
+          materials =
+            (materials ? materials + "\n\n" : "") + `## ${found.heading}\n${found.text}`;
+        }
+        searchDone = true;
+        await persistCp();
+      } else if (!searchDone) {
+        searchDone = true;
+        await persistCp();
       }
 
-      const priorContext = buildPriorContext(episode, episodes);
+      if (!stillThisJob()) return;
+
+      const latestList = await listEpisodes();
+      const priorContext = buildPriorContext(episode, latestList);
+      const resume =
+        cp?.outline && Array.isArray(cp.outline.sections)
+          ? {
+              outline: cp.outline,
+              segments: cp.segments || [],
+              nextSectionIndex: cp.nextSectionIndex || 0,
+            }
+          : null;
+
       const script = await generateEpisodeScript(
         { ...episode, materials, priorContext },
         participants,
-        (p) => genProgress.set(episode.id, p)
+        (p) => setProg(p),
+        {
+          resume,
+          onCheckpoint: async (partial) => {
+            await persistCp({
+              outline: partial.outline,
+              segments: partial.segments,
+              nextSectionIndex: partial.nextSectionIndex,
+              sectionCount: partial.sectionCount,
+              scriptTitle: partial.scriptTitle,
+            });
+          },
+        }
       );
 
-      // Re-read to avoid clobbering concurrent edits, then persist.
-      const latest = await listEpisodes();
-      const li = latest.findIndex((e) => e.id === episode.id);
-      if (li !== -1) {
-        latest[li] = {
-          ...latest[li],
-          title: script.title || latest[li].title,
-          script,
-          searchSources,
-          status: "script_ready",
-          updatedAt: new Date().toISOString(),
-        };
-        await saveEpisodes(latest);
-      }
-      genProgress.set(episode.id, { phase: "done" });
+      if (!stillThisJob()) return;
+
+      await clearCheckpoint(episode.id);
+      await patchEpisodeFields(episode.id, {
+        title: script.title || episode.title,
+        script,
+        searchSources,
+        genCheckpoint: null,
+        status: "script_ready",
+      });
+      setProg({ phase: "done" });
     } catch (err) {
-      genProgress.set(episode.id, { phase: "error", error: String(err.message || err) });
+      if (!stillThisJob()) return;
+      touchProgress(episode.id, { phase: "error", error: String(err.message || err) });
     }
   })();
 });
-
+/** Merge fields onto an episode and save. Returns the updated episode or null. */
+async function patchEpisodeFields(id, fields) {
+  const episodes = await listEpisodes();
+  const i = episodes.findIndex((e) => e.id === id);
+  if (i === -1) return null;
+  episodes[i] = {
+    ...episodes[i],
+    ...fields,
+    id,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveEpisodes(episodes);
+  return episodes[i];
+}
 // Poll generation progress. Returns {phase, current?, total?, error?} or null.
-// Phases: search | outline | section | single | done | error.
+// Phases: fetch_urls | search | outline | section | single | done | error.
 app.get("/api/episodes/:id/gen-progress", (req, res) => {
   res.json(genProgress.get(req.params.id) || null);
 });
@@ -402,6 +603,7 @@ function sanitizeEpisode(body = {}) {
     title: String(body.title || "").trim(),
     topic: String(body.topic || ""),
     materials: String(body.materials || ""),
+    materialLinks: String(body.materialLinks || ""),
     durationMinutes: Math.max(1, Number(body.durationMinutes) || 10),
     hostId: String(body.hostId || ""),
     guestIds: Array.isArray(body.guestIds) ? body.guestIds.map(String) : [],
