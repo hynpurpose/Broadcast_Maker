@@ -445,15 +445,20 @@ app.get("/api/episodes/:id/export", async (req, res) => {
 
   try {
     const buffers = [];
-    for (const seg of segments) {
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
       const c = byId.get(seg.speaker);
-      const { buffer } = await cachedSynthesize({
-        text: seg.text,
-        voiceId: c?.voiceId || undefined,
-        speed: c?.speed,
-        format: "mp3",
-      });
-      buffers.push(buffer);
+      try {
+        const { buffer } = await cachedSynthesize({
+          text: seg.text,
+          voiceId: c?.voiceId || undefined,
+          speed: c?.speed,
+          format: "mp3",
+        });
+        buffers.push(buffer);
+      } catch (err) {
+        throw new Error(`第 ${i + 1} 段配音失败：${err.message || err}`);
+      }
     }
     const all = Buffer.concat(buffers);
     const name = (episode.title || "podcast").replace(/[\\/:*?"<>|]/g, "_");

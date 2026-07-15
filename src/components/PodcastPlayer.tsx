@@ -29,7 +29,10 @@ export function PodcastPlayer({
   const [status, setStatus] = useState<Record<number, SegStatus>>({});
   const [error, setError] = useState<string | null>(null);
   const [prewarming, setPrewarming] = useState(false);
+  const [prewarmDone, setPrewarmDone] = useState(0);
+  const [prewarmFailed, setPrewarmFailed] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const [exportDone, setExportDone] = useState(0);
 
   useEffect(() => {
     currentRef.current = current;
@@ -58,9 +61,19 @@ export function PodcastPlayer({
       const key = keyOf(index);
       if (!bust) {
         const cached = urlsRef.current[key];
-        if (cached) return Promise.resolve(cached);
+        if (cached) {
+          setStatus((s) => (s[index] === "ready" ? s : { ...s, [index]: "ready" }));
+          return Promise.resolve(cached);
+        }
         const inflight = promisesRef.current[key];
-        if (inflight) return inflight;
+        if (inflight) {
+          // 同内容其它段在飞：本段也标 loading，完成后标 ready
+          setStatus((s) => ({ ...s, [index]: "loading" }));
+          return inflight.then((url) => {
+            setStatus((s) => ({ ...s, [index]: "ready" }));
+            return url;
+          });
+        }
       } else {
         const old = urlsRef.current[key];
         if (old) URL.revokeObjectURL(old);
@@ -151,18 +164,50 @@ export function PodcastPlayer({
 
   async function prewarmAll() {
     setPrewarming(true);
+    setPrewarmDone(0);
+    setPrewarmFailed(0);
+    let failed = 0;
     try {
-      for (let i = 0; i < n; i++) await ensureAudio(i).catch(() => {});
+      for (let i = 0; i < n; i++) {
+        try {
+          await ensureAudio(i);
+        } catch {
+          failed += 1;
+          setPrewarmFailed(failed);
+        }
+        setPrewarmDone(i + 1);
+      }
+      if (failed > 0) {
+        setError(`预缓存完成，但有 ${failed} 段失败（红点）。导出前请重试失败段或点「预缓存全部」。`);
+      }
     } finally {
       setPrewarming(false);
     }
   }
 
+  /** 优先用播放器内存里已缓存的段落拼接；缺的再走 /api/tts（磁盘缓存或 Fish）。 */
   async function exportMp3() {
     setError(null);
     setExporting(true);
+    setExportDone(0);
     try {
-      const blob = await api.exportEpisode(episode.id);
+      const parts: ArrayBuffer[] = [];
+      for (let i = 0; i < n; i++) {
+        try {
+          const url = await ensureAudio(i);
+          const buf = await fetch(url).then((r) => {
+            if (!r.ok) throw new Error(`读取第 ${i + 1} 段音频失败`);
+            return r.arrayBuffer();
+          });
+          parts.push(buf);
+        } catch (e) {
+          throw new Error(
+            `第 ${i + 1} 段无法导出：${e instanceof Error ? e.message : e}`
+          );
+        }
+        setExportDone(i + 1);
+      }
+      const blob = new Blob(parts, { type: "audio/mpeg" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -192,6 +237,11 @@ export function PodcastPlayer({
     setPlaying(false);
     setStatus({});
     setError(null);
+    setPrewarming(false);
+    setPrewarmDone(0);
+    setPrewarmFailed(0);
+    setExporting(false);
+    setExportDone(0);
   }, [episode.id]);
 
   // 卸载时回收
@@ -201,9 +251,11 @@ export function PodcastPlayer({
     };
   }, []);
 
-  const readyCount = Object.values(status).filter((s) => s === "ready").length;
-
   if (!episode.script || n === 0) return null;
+
+  const progressDone = exporting ? exportDone : prewarmDone;
+  const progressActive = prewarming || exporting;
+  const progressPct = n > 0 ? Math.round((progressDone / n) * 100) : 0;
 
   return (
     <div className="player-panel">
@@ -217,13 +269,23 @@ export function PodcastPlayer({
 
         <span className="counter muted small">{current < 0 ? "—" : current + 1} / {n}</span>
 
-        <button className="ghost" onClick={prewarmAll} disabled={prewarming} title="提前生成全部段落配音">
-          {prewarming ? `预缓存中… ${readyCount}/${n}` : "⚡ 预缓存全部"}
+        <button className="ghost" onClick={prewarmAll} disabled={prewarming || exporting} title="提前生成全部段落配音">
+          {prewarming ? `预缓存中… ${prewarmDone}/${n}` : "⚡ 预缓存全部"}
         </button>
-        <button onClick={exportMp3} disabled={exporting} title="把整期合成一个 mp3 下载（会补齐未生成的段落）">
-          {exporting ? "导出中…" : "⬇ 导出 mp3"}
+        <button onClick={exportMp3} disabled={exporting || prewarming} title="用已缓存配音在本地拼成 mp3；缺段会自动补生成">
+          {exporting ? `导出中… ${exportDone}/${n}` : "⬇ 导出 mp3"}
         </button>
       </div>
+
+      {progressActive && (
+        <div className="prewarm-progress" role="progressbar" aria-valuenow={progressDone} aria-valuemin={0} aria-valuemax={n}>
+          <div className="prewarm-progress-bar" style={{ width: `${progressPct}%` }} />
+          <span className="prewarm-progress-label muted small">
+            {exporting ? "导出拼接" : "配音预缓存"} {progressDone}/{n}（{progressPct}%）
+            {!exporting && prewarmFailed > 0 ? ` · 失败 ${prewarmFailed}` : ""}
+          </span>
+        </div>
+      )}
 
       {error && <p className="error">⚠ {error}</p>}
 
