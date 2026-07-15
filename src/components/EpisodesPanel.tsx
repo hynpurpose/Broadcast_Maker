@@ -5,42 +5,19 @@ import { SCRIPT_MODELS, SEARCH_MODES } from "../constants";
 import { EpisodeForm } from "./EpisodeForm";
 import { PodcastPlayer } from "./PodcastPlayer";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { SourcesBlock } from "./SourcesBlock";
+import {
+  EpisodeLibrary,
+  episodeSearchMode,
+  hasResumableCheckpoint,
+  checkpointHint,
+} from "./EpisodeLibrary";
 
 const modelLabel = (id: string) =>
   SCRIPT_MODELS.find((m) => m.id === id)?.label || SCRIPT_MODELS[0].label;
 
-function episodeSearchMode(e: Episode & { searchEnabled?: boolean }): SearchMode {
-  if (e.searchMode) return e.searchMode;
-  return e.searchEnabled ? "google" : "off";
-}
-
 const searchModeLabel = (mode: SearchMode) =>
   SEARCH_MODES.find((m) => m.id === mode)?.label || mode;
-
-function searchBadge(mode: SearchMode): string | null {
-  if (mode === "off") return null;
-  if (mode === "google") return "🌐 Google Search";
-  if (mode === "deep_research") return "🔬 Deep Research";
-  return "🔬 Deep Research Max";
-}
-
-function hasResumableCheckpoint(e: Episode | null): boolean {
-  const cp = e?.genCheckpoint;
-  if (!cp) return false;
-  return Boolean(cp.outline || cp.searchDone || cp.urlsFetched || (cp.segments && cp.segments.length > 0));
-}
-
-function checkpointHint(e: Episode): string {
-  const cp = e.genCheckpoint!;
-  if (cp.outline) {
-    const done = cp.nextSectionIndex || 0;
-    const total = cp.sectionCount || "?";
-    return `已完成 ${done}/${total} 段，可继续`;
-  }
-  if (cp.searchDone) return "调研已完成，可从写大纲继续";
-  if (cp.urlsFetched) return "链接已抓取，可继续";
-  return "有未完成进度，可继续";
-}
 
 export function EpisodesPanel({ characters }: { characters: Character[] }) {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
@@ -50,7 +27,9 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
   const [progress, setProgress] = useState<GenProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detailRef = useRef<HTMLDivElement | null>(null);
 
   function stopPolling() {
     if (pollRef.current) {
@@ -120,15 +99,19 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
   }, [selectedId]);
 
   const selected = episodes.find((e) => e.id === selectedId) || null;
+  const selectedIndex = selected ? episodes.findIndex((e) => e.id === selected.id) : -1;
+  const prevEpisode = selectedIndex > 0 ? episodes[selectedIndex - 1] : null;
+  const nextEpisode =
+    selectedIndex >= 0 && selectedIndex < episodes.length - 1 ? episodes[selectedIndex + 1] : null;
 
   async function handleSubmit(draft: EpisodeDraft) {
     if (editing) {
       const updated = await api.updateEpisode(editing.id, draft);
       setEditing(null);
-      setSelectedId(updated.id);
+      selectEpisode(updated.id);
     } else {
       const created = await api.createEpisode(draft);
-      setSelectedId(created.id);
+      selectEpisode(created.id);
     }
     refresh();
   }
@@ -143,7 +126,10 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
     const { id } = pendingDelete;
     setPendingDelete(null);
     await api.deleteEpisode(id);
-    if (selectedId === id) setSelectedId(null);
+    if (selectedId === id) {
+      setSelectedId(null);
+      setLibraryOpen(false);
+    }
     if (editing?.id === id) setEditing(null);
     if (generatingId === id) {
       stopPolling();
@@ -200,6 +186,30 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
     setEpisodes((list) => list.map((e) => (e.id === updated.id ? updated : e)));
   }
 
+  function selectEpisode(id: string) {
+    setSelectedId(id);
+    setLibraryOpen(false);
+    requestAnimationFrame(() => {
+      detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
+  function backToList() {
+    setSelectedId(null);
+    setLibraryOpen(false);
+  }
+
+  const libraryProps = {
+    episodes,
+    selectedId,
+    onSelect: selectEpisode,
+    onEdit: (e: Episode) => {
+      setEditing(e);
+      setLibraryOpen(false);
+    },
+    onDelete: requestDelete,
+  };
+
   return (
     <div className="col">
       <div className="layout">
@@ -214,9 +224,22 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
         </section>
 
         <section className="col">
-          <div className="card">
-            <h2>脚本</h2>
-            {!selected && <p className="muted">从下方选择一期节目。</p>}
+          <div className="card episode-script-card" ref={detailRef}>
+            {selected ? (
+              <div className="episode-detail-bar">
+                <h2 className="episode-detail-title">{selected.title || "（未命名节目）"}</h2>
+                <button
+                  type="button"
+                  className="episode-detail-edit"
+                  onClick={() => setEditing(selected)}
+                >
+                  编辑
+                </button>
+              </div>
+            ) : (
+              <h2>脚本</h2>
+            )}
+            {!selected && <p className="muted">从下方节目列表选择一期。</p>}
             {selected && (
               <>
                 <div className="gen-row">
@@ -269,95 +292,65 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
                 ) : null}
                 {error && <p className="error">⚠ {error}</p>}
                 {selected.searchSources && selected.searchSources.length > 0 && (
-                  <div className="sources">
-                    <div className="muted small">参考来源（Gemini 联网）：</div>
-                    <ul>
-                      {selected.searchSources.map((s, i) => (
-                        <li key={i}>
-                          <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                  <SourcesBlock sources={selected.searchSources} />
                 )}
                 {selected.script ? (
-                  <PodcastPlayer
-                    episode={selected}
-                    characters={characters}
-                    onSaveSegment={(index, patch) => handleSaveSegment(selected.id, index, patch)}
-                  />
+                  <>
+                    <PodcastPlayer
+                      episode={selected}
+                      characters={characters}
+                      onSaveSegment={(index, patch) => handleSaveSegment(selected.id, index, patch)}
+                      onEject={() => setLibraryOpen(true)}
+                      onPrevEpisode={() => {
+                        if (prevEpisode) selectEpisode(prevEpisode.id);
+                      }}
+                      onNextEpisode={() => {
+                        if (nextEpisode) selectEpisode(nextEpisode.id);
+                      }}
+                      canPrevEpisode={Boolean(prevEpisode)}
+                      canNextEpisode={Boolean(nextEpisode)}
+                    />
+                    <button type="button" className="back-to-list below-script" onClick={backToList}>
+                      ← 返回节目列表
+                    </button>
+                  </>
                 ) : (
-                  <p className="muted">还没有脚本。指定好主持人和至少一位嘉宾后点「生成脚本」。</p>
+                  <>
+                    <p className="muted">还没有脚本。指定好主持人和至少一位嘉宾后点「生成脚本」。</p>
+                    <button type="button" className="back-to-list below-script" onClick={backToList}>
+                      ← 返回节目列表
+                    </button>
+                  </>
                 )}
               </>
             )}
           </div>
+
+          {!selected && <EpisodeLibrary {...libraryProps} />}
         </section>
       </div>
 
-      <div className="card">
-        <h2>节目列表（{episodes.length}）</h2>
-        {episodes.length === 0 && <p className="muted">还没有节目，先新建一期。</p>}
-        <div className="episode-list">
-          {episodes.map((e) => {
-            const isSelected = e.id === selectedId;
-            const isReady = e.status === "script_ready";
-            const badge = searchBadge(episodeSearchMode(e));
-            const dateStr = new Date(e.createdAt || Date.now()).toLocaleDateString("zh-CN", {
-              month: "short",
-              day: "numeric",
-            });
-
-            return (
-              <div
-                key={e.id}
-                className={"episode-card" + (isSelected ? " active" : "") + (isReady ? " is-ready" : " is-draft")}
-                onClick={() => setSelectedId(e.id)}
-              >
-                <span className={"ep-card-status " + (isReady ? "ready" : "draft")}>
-                  {isReady ? "READY" : "DRAFT"}
-                </span>
-
-                <div className={"ep-badge " + (isReady ? "ready" : "draft")}>
-                  <div className="ep-badge-main">
-                    <span className="ep-badge-duration">{e.durationMinutes}</span>
-                    <span className="ep-badge-unit">MIN</span>
-                  </div>
-                </div>
-
-                <div className="ep-info">
-                  <h3 className="ep-title">{e.title || "（未命名节目）"}</h3>
-                  <p className="ep-topic">{e.topic || "暂无主题描述"}</p>
-                  {hasResumableCheckpoint(e) && (
-                    <p className="ep-topic ep-topic-checkpoint">
-                      ⏸ {checkpointHint(e)}
-                    </p>
-                  )}
-                  <div className="ep-meta">
-                    <span className="ep-meta-item">
-                      🤖 {e.model === "claude-opus-4-8" ? "Opus" : "Sonnet"}
-                    </span>
-                    <span className="ep-meta-item">
-                      👥 嘉宾 {e.guestIds.length} 位
-                    </span>
-                    {badge && <span className="ep-meta-item">{badge}</span>}
-                    <span className="ep-meta-item date">📅 {dateStr}</span>
-                  </div>
-                </div>
-
-                <div className="ep-actions" onClick={(ev) => ev.stopPropagation()}>
-                  <button className={isSelected ? "primary" : ""} onClick={() => setEditing(e)}>
-                    编辑
-                  </button>
-                  <button className="danger" onClick={() => requestDelete(e.id)}>
-                    删除
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+      {libraryOpen && selected && (
+        <div
+          className="confirm-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="library-dialog-title"
+          onClick={() => setLibraryOpen(false)}
+        >
+          <div className="library-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="library-dialog-head">
+              <h3 id="library-dialog-title">节目库 · 开仓换带</h3>
+              <button type="button" className="library-dialog-close" onClick={() => setLibraryOpen(false)}>
+                关闭
+              </button>
+            </div>
+            <div className="library-dialog-body">
+              <EpisodeLibrary {...libraryProps} />
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       {pendingDelete && (
         <ConfirmDialog

@@ -570,6 +570,81 @@ export async function generateRandomCharacter(opts = {}) {
  * Does not touch avatar or voiceId.
  * @param {Record<string, unknown>} draft
  */
+/**
+ * Polish an episode topic the user already wrote. Optional title/materials
+ * are context only — only `topic` is rewritten.
+ * @param {{ topic?: string, title?: string, materials?: string }} draft
+ */
+export async function polishEpisodeTopic(draft = {}) {
+  const topic = String(draft.topic || "").trim();
+  if (!topic) {
+    throw new Error("请先填写主题，再进行 AI 润色");
+  }
+
+  const title = String(draft.title || "").trim();
+  const materials = String(draft.materials || "").trim();
+  const contextLines = [`- 当前主题：${topic}`];
+  if (title) contextLines.push(`- 节目标题（仅供参考，不要改写标题）：${title}`);
+  if (materials) {
+    const snip =
+      materials.length > 1500 ? materials.slice(0, 1500) + "……（已截断）" : materials;
+    contextLines.push(`- 参考材料摘要（仅供参考，不要改写材料）：\n${snip}`);
+  }
+
+  const prompt =
+    `你是播客选题润色助手。用户已写下本期节目主题，请在保留核心意图的前提下润色。\n\n` +
+    `${contextLines.join("\n")}\n\n` +
+    `规则：\n` +
+    `- 只润色「主题」本身，不要输出标题或材料\n` +
+    `- 保留用户原意与关键对象，不要换成另一个话题\n` +
+    `- 写得更具体、清晰，适合播客对谈：最好能看出「聊什么 + 什么角度/争议/切口」\n` +
+    `- 1～3 句即可，口语自然，不要空泛口号，不要堆砌形容词\n` +
+    `- 不要加「本期我们将讨论」这类套话前缀\n\n` +
+    `只输出一个 JSON 对象，不要 markdown 围栏，不要其它说明：\n` +
+    `{"topic":"..."}`;
+
+  const apiKey = requireApiKey();
+  const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
+  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.7,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`AI 润色失败 (${res.status}): ${detail.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const raw = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p?.text || "")
+    .join("")
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  } catch {
+    throw new Error("模型返回的润色结果无法解析");
+  }
+
+  const polished = String(parsed.topic || "").trim();
+  if (!polished) throw new Error("模型未返回有效主题");
+  return { topic: polished };
+}
+
 export async function polishCharacter(draft = {}) {
   const filled = {
     name: String(draft.name || "").trim(),

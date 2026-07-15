@@ -85,6 +85,17 @@ export const api = {
       };
     }),
 
+  polishTopic: (draft: { topic: string; title?: string; materials?: string }) =>
+    fetch("/api/episodes/polish-topic", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as { topic: string };
+    }),
+
   listEpisodes: () => fetch("/api/episodes").then((r) => json<Episode[]>(r)),
 
   createEpisode: (draft: EpisodeDraft) =>
@@ -175,15 +186,31 @@ export const api = {
   /** Returns an object URL for the synthesized audio. `nocache` forces a fresh take. */
   async tts(
     text: string,
-    opts: { voiceId?: string; speed?: number; nocache?: boolean } = {}
+    opts: { voiceId?: string; speed?: number; nocache?: boolean; signal?: AbortSignal } = {}
   ): Promise<string> {
+    const { signal, ...body } = opts;
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, ...opts }),
+      body: JSON.stringify({ text, ...body }),
+      signal,
     });
     if (!res.ok) throw new Error((await res.text()) || "TTS failed");
     const blob = await res.blob();
     return URL.createObjectURL(blob);
   },
+
+  /** Check which clips are already on the server disk cache (no audio download). */
+  checkTtsCache: (
+    items: Array<{ text: string; voiceId?: string; speed?: number }>
+  ) =>
+    fetch("/api/tts/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as { hits: boolean[] };
+    }),
 };

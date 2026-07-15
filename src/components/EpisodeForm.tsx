@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Character, Episode, EpisodeDraft, SearchMode } from "../types";
 import { SCRIPT_MODELS, DEFAULT_MODEL, SEARCH_MODES, DEFAULT_SEARCH_MODE } from "../constants";
+import { api } from "../api";
 import { Select } from "./Select";
 
 const EMPTY: EpisodeDraft = {
@@ -36,6 +37,8 @@ export function EpisodeForm({
   onCancel: () => void;
 }) {
   const [draft, setDraft] = useState<EpisodeDraft>(EMPTY);
+  const [polishing, setPolishing] = useState(false);
+  const [polishError, setPolishError] = useState<string | null>(null);
 
   useEffect(() => {
     if (editing) {
@@ -81,6 +84,24 @@ export function EpisodeForm({
     }));
   }
 
+  async function handlePolishTopic() {
+    setPolishError(null);
+    setPolishing(true);
+    try {
+      const result = await api.polishTopic({
+        topic: draft.topic,
+        title: draft.title,
+        materials: draft.materials,
+      });
+      set("topic", result.topic);
+    } catch (e) {
+      setPolishError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setPolishing(false);
+    }
+  }
+
+  const canPolishTopic = !polishing && Boolean(draft.topic.trim());
   const estWords = draft.durationMinutes * 300;
 
   return (
@@ -92,6 +113,8 @@ export function EpisodeForm({
       }}
     >
       <h2>{editing ? "编辑节目" : "新建节目"}</h2>
+
+      {polishError && <p className="error">⚠ {polishError}</p>}
 
       <label>
         节目标题（可留空，让 AI 起）
@@ -119,11 +142,29 @@ export function EpisodeForm({
         </label>
       )}
 
-      <label>
-        主题
-        <textarea value={draft.topic} onChange={(e) => set("topic", e.target.value)} rows={2}
-          placeholder="本期要聊什么（尽量具体：对象 + 角度）" />
-      </label>
+      <div className="field-block">
+        <div className="field-head">
+          <span>主题</span>
+          <button
+            type="button"
+            className={"ai-polish compact" + (polishing ? " loading" : "")}
+            onClick={handlePolishTopic}
+            disabled={!canPolishTopic}
+            title="润色已写好的主题（保留原意，写得更具体）"
+          >
+            {polishing ? "润色中…" : "AI 润色"}
+          </button>
+        </div>
+        <textarea
+          value={draft.topic}
+          onChange={(e) => {
+            set("topic", e.target.value);
+            if (polishError) setPolishError(null);
+          }}
+          rows={2}
+          placeholder="本期要聊什么（尽量具体：对象 + 角度）"
+        />
+      </div>
 
       <label>
         参考材料（文字要点、数据、观点等）
@@ -178,15 +219,17 @@ export function EpisodeForm({
       <fieldset className="guests">
         <legend>嘉宾（可多选）</legend>
         {characters.length === 0 && <p className="muted small">先去「角色库」创建角色。</p>}
-        {characters.map((c) => (
-          <label key={c.id} className="checkbox" data-disabled={c.id === draft.hostId}>
-            <input type="checkbox" checked={draft.guestIds.includes(c.id)}
-              disabled={c.id === draft.hostId}
-              onChange={() => toggleGuest(c.id)} />
-            {c.name}
-            {c.id === draft.hostId && <span className="muted small">（已是主持人）</span>}
-          </label>
-        ))}
+        <div className="guest-grid">
+          {characters.map((c) => (
+            <label key={c.id} className="checkbox" data-disabled={c.id === draft.hostId}>
+              <input type="checkbox" checked={draft.guestIds.includes(c.id)}
+                disabled={c.id === draft.hostId}
+                onChange={() => toggleGuest(c.id)} />
+              {c.name}
+              {c.id === draft.hostId && <span className="muted small">（已是主持人）</span>}
+            </label>
+          ))}
+        </div>
       </fieldset>
 
       <label>

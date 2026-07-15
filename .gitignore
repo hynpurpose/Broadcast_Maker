@@ -2,6 +2,9 @@ node_modules/
 dist/
 .env
 .env.local
-server/data/
+server/data/audio/
+server/data/gen-checkpoints/
+server/data/episodes.json
+server/data/chats.json
 *.log
 .DS_Store

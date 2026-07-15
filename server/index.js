@@ -9,7 +9,7 @@ import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, 
 import { generateChatReplies } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
-import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls, generateRandomCharacter, polishCharacter } from "./gemini.js";
+import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls, generateRandomCharacter, polishCharacter, polishEpisodeTopic } from "./gemini.js";
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from "./checkpoint.js";
 
 // In-memory generation progress, keyed by episode id (for the poll endpoint).
@@ -89,6 +89,16 @@ app.post("/api/characters/polish", async (req, res) => {
   try {
     const draft = await polishCharacter(req.body || {});
     res.json(draft);
+  } catch (e) {
+    res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+  }
+});
+
+/** Polish an episode topic the user already wrote (not saved). */
+app.post("/api/episodes/polish-topic", async (req, res) => {
+  try {
+    const result = await polishEpisodeTopic(req.body || {});
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
   }
@@ -574,14 +584,21 @@ app.post("/api/chats/:id/message", async (req, res) => {
 // Synthesize one clip with a disk cache. Cache key = hash(model + voice + speed
 // + format + text) so replays and the player's look-ahead prefetch are instant
 // and never re-bill an identical clip. `nocache` forces a fresh take (重配).
-async function cachedSynthesize({ text, voiceId, speed, format = "mp3", nocache = false }) {
+function ttsCacheKey({ text, voiceId, speed, format = "mp3" }) {
   const model = process.env.FISH_MODEL || "s2.1-pro-free";
   const ref = voiceId || process.env.FISH_DEFAULT_VOICE_ID || "";
-  const contentType = format === "mp3" ? "audio/mpeg" : `audio/${format}`;
-  const key = createHash("sha1")
+  return createHash("sha1")
     .update([model, ref, speed || 1, format, text].join(" "))
     .digest("hex");
-  const file = join(AUDIO_DIR, `${key}.${format}`);
+}
+
+function ttsCachePath({ text, voiceId, speed, format = "mp3" }) {
+  return join(AUDIO_DIR, `${ttsCacheKey({ text, voiceId, speed, format })}.${format}`);
+}
+
+async function cachedSynthesize({ text, voiceId, speed, format = "mp3", nocache = false }) {
+  const contentType = format === "mp3" ? "audio/mpeg" : `audio/${format}`;
+  const file = ttsCachePath({ text, voiceId, speed, format });
   if (!nocache && existsSync(file)) {
     return { buffer: await readFile(file), contentType, hit: true };
   }
@@ -589,6 +606,25 @@ async function cachedSynthesize({ text, voiceId, speed, format = "mp3", nocache 
   await writeFile(file, out.buffer);
   return { buffer: out.buffer, contentType: out.contentType || contentType, hit: false };
 }
+
+/** Batch-check which clips are already on disk (no audio bytes transferred). */
+app.post("/api/tts/check", (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : null;
+  if (!items) return res.status(400).json({ error: "items array required" });
+  const hits = items.map((item) => {
+    const text = String(item?.text || "").trim();
+    if (!text) return false;
+    return existsSync(
+      ttsCachePath({
+        text,
+        voiceId: item.voiceId,
+        speed: item.speed,
+        format: item.format || "mp3",
+      })
+    );
+  });
+  res.json({ hits });
+});
 
 // --- TTS: type/segment text -> get audio back (disk-cached) ---
 app.post("/api/tts", async (req, res) => {
