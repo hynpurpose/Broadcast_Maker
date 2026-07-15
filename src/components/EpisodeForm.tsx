@@ -198,9 +198,9 @@ export function EpisodeForm({
         />
       </label>
 
-      <div className="actions">
-        <button type="submit" className="primary">{editing ? "保存" : "创建"}</button>
+      <div className="actions end">
         {editing && <button type="button" onClick={onCancel}>取消</button>}
+        <button type="submit" className="primary wide">{editing ? "保存" : "创建"}</button>
       </div>
     </form>
   );

@@ -34,6 +34,57 @@ export const api = {
       if (!r.ok) throw new Error(r.statusText);
     }),
 
+  generateRandomCharacter: (opts: {
+    education: "low" | "mid" | "high" | "elite" | "expert";
+    personality: "gentle" | "soft" | "balanced" | "spicy" | "fierce";
+    openness: "conservative" | "cautious" | "neutral" | "open" | "radical";
+    expertField?: string;
+  }) =>
+    fetch("/api/characters/random", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as {
+        name: string;
+        persona: string;
+        languageStyle: string;
+        faction: string;
+        backstory: string;
+        defaultEmotion: string;
+        speed: number;
+      };
+    }),
+
+  polishCharacter: (draft: {
+    name?: string;
+    persona?: string;
+    languageStyle?: string;
+    faction?: string;
+    backstory?: string;
+    defaultEmotion?: string;
+    speed?: number;
+  }) =>
+    fetch("/api/characters/polish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as {
+        name: string;
+        persona: string;
+        languageStyle: string;
+        faction: string;
+        backstory: string;
+        defaultEmotion: string;
+        speed: number;
+      };
+    }),
+
   listEpisodes: () => fetch("/api/episodes").then((r) => json<Episode[]>(r)),
 
   createEpisode: (draft: EpisodeDraft) =>

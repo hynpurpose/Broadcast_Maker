@@ -7,6 +7,7 @@ const EMPTY: CharacterDraft = {
   persona: "",
   languageStyle: "",
   faction: "",
+  backstory: "",
   voiceId: "",
   speed: 1,
   defaultEmotion: "",
@@ -15,16 +16,24 @@ const EMPTY: CharacterDraft = {
 
 export function CharacterForm({
   editing,
+  seed,
   onSubmit,
   onCancel,
+  onClear,
 }: {
   editing: Character | null;
+  /** When set (and not editing), fill the form with this draft. */
+  seed?: { key: number; draft: CharacterDraft } | null;
   onSubmit: (draft: CharacterDraft) => void;
   onCancel: () => void;
+  onClear?: () => void;
 }) {
   const [draft, setDraft] = useState<CharacterDraft>(EMPTY);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [polishing, setPolishing] = useState(false);
+  const [polishError, setPolishError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{ name?: string; backstory?: string }>({});
 
   function handleAvatarUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -71,29 +80,107 @@ export function CharacterForm({
         ...rest,
         avatar: rest.avatar || "",
       });
+    } else if (seed) {
+      setDraft({
+        ...EMPTY,
+        ...seed.draft,
+        voiceId: "",
+        avatar: "",
+      });
     } else {
       setDraft(EMPTY);
     }
-  }, [editing]);
+    setFieldErrors({});
+  }, [editing, seed?.key]);
 
   function set<K extends keyof CharacterDraft>(key: K, value: CharacterDraft[K]) {
     setDraft((d) => ({ ...d, [key]: value }));
+    if (key === "name" || key === "backstory") {
+      setFieldErrors((err) => {
+        if (!err[key]) return err;
+        const next = { ...err };
+        delete next[key];
+        return next;
+      });
+    }
   }
+
+  function validate(): boolean {
+    const next: { name?: string; backstory?: string } = {};
+    if (!draft.name.trim()) next.name = "请填写角色名";
+    if (!draft.backstory.trim()) next.backstory = "请填写过往经历";
+    setFieldErrors(next);
+    return Object.keys(next).length === 0;
+  }
+
+  async function handlePolish() {
+    setPolishError(null);
+    setPolishing(true);
+    try {
+      const polished = await api.polishCharacter({
+        name: draft.name,
+        persona: draft.persona,
+        languageStyle: draft.languageStyle,
+        faction: draft.faction,
+        backstory: draft.backstory,
+        defaultEmotion: draft.defaultEmotion,
+        speed: draft.speed,
+      });
+      setDraft((d) => ({
+        ...d,
+        name: polished.name,
+        persona: polished.persona,
+        languageStyle: polished.languageStyle,
+        faction: polished.faction,
+        backstory: polished.backstory,
+        defaultEmotion: polished.defaultEmotion,
+        speed: polished.speed,
+        // keep avatar & voiceId untouched
+      }));
+    } catch (e) {
+      setPolishError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setPolishing(false);
+    }
+  }
+
+  const canPolish =
+    !polishing &&
+    Boolean(
+      draft.name.trim() ||
+        draft.persona.trim() ||
+        draft.languageStyle.trim() ||
+        draft.faction.trim() ||
+        draft.backstory.trim() ||
+        draft.defaultEmotion.trim()
+    );
 
   return (
     <form
       className="card form"
+      noValidate
       onSubmit={(e) => {
         e.preventDefault();
-        if (!draft.name.trim()) return;
+        if (!validate()) return;
         onSubmit(draft);
       }}
     >
-      <h2>{editing ? "编辑角色" : "新建角色"}</h2>
+      <div className="form-header">
+        <h2>{editing ? "编辑角色" : "新建角色"}</h2>
+      </div>
+
+      {polishError && <p className="error">⚠ {polishError}</p>}
 
       <label>
         角色名
-        <input value={draft.name} onChange={(e) => set("name", e.target.value)} placeholder="例如：老陈" />
+        <input
+          value={draft.name}
+          onChange={(e) => set("name", e.target.value)}
+          placeholder="例如：老陈"
+          className={fieldErrors.name ? "invalid" : undefined}
+          aria-invalid={Boolean(fieldErrors.name)}
+        />
+        {fieldErrors.name && <span className="field-tip">{fieldErrors.name}</span>}
       </label>
 
       <label>
@@ -112,6 +199,19 @@ export function CharacterForm({
         观点阵营 / 立场
         <input value={draft.faction} onChange={(e) => set("faction", e.target.value)}
           placeholder="技术乐观派 / 保守谨慎派……" />
+      </label>
+
+      <label>
+        过往经历
+        <textarea
+          value={draft.backstory}
+          onChange={(e) => set("backstory", e.target.value)}
+          rows={3}
+          placeholder="出身、职业转折、关键经历……会影响说话视角与举例方式"
+          className={fieldErrors.backstory ? "invalid" : undefined}
+          aria-invalid={Boolean(fieldErrors.backstory)}
+        />
+        {fieldErrors.backstory && <span className="field-tip">{fieldErrors.backstory}</span>}
       </label>
 
       <label>
@@ -185,9 +285,43 @@ export function CharacterForm({
           placeholder="平静 / 热情 / 冷峻……" />
       </label>
 
-      <div className="actions">
-        <button type="submit" className="primary">{editing ? "保存" : "创建"}</button>
-        {editing && <button type="button" onClick={onCancel}>取消</button>}
+      <div className="actions split">
+        {!editing ? (
+          <button
+            type="button"
+            className="form-clear"
+            onClick={() => {
+              setDraft(EMPTY);
+              setUploadError(null);
+              setPolishError(null);
+              setFieldErrors({});
+              onClear?.();
+            }}
+          >
+            清空
+          </button>
+        ) : (
+          <span />
+        )}
+        <div className="actions-right">
+          <button
+            type="button"
+            className={"ai-polish" + (polishing ? " loading" : "")}
+            onClick={handlePolish}
+            disabled={!canPolish}
+            title="根据已填内容润色并补全（不含头像与音色）"
+          >
+            {polishing ? "润色中…" : "AI 润色"}
+          </button>
+          {editing && (
+            <button type="button" onClick={onCancel}>
+              取消
+            </button>
+          )}
+          <button type="submit" className="primary wide">
+            {editing ? "保存" : "创建"}
+          </button>
+        </div>
       </div>
     </form>
   );

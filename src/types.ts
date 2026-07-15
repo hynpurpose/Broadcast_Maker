@@ -7,6 +7,8 @@ export interface Character {
   languageStyle: string;
   /** 观点阵营 / 立场 */
   faction: string;
+  /** 过往经历 */
+  backstory: string;
   /** Fish Audio reference_id（绑定音色） */
   voiceId: string;
   /** 语速倍率，默认 1 */

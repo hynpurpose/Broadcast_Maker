@@ -93,11 +93,11 @@ export function ScriptView({
                     onChange={(e) => setDraftEmotion(e.target.value)}
                     placeholder="情绪（可选）"
                   />
-                  <div className="actions">
+                  <div className="actions end">
+                    <button disabled={saving} onClick={() => setEditing(null)}>取消</button>
                     <button className="primary" disabled={saving} onClick={() => save(i)}>
                       {saving ? "保存中…" : "保存"}
                     </button>
-                    <button disabled={saving} onClick={() => setEditing(null)}>取消</button>
                   </div>
                 </div>
               ) : (

@@ -431,4 +431,246 @@ export async function gatherSearchMaterial(ctx, searchMode, onTick) {
   throw new Error(`不支持的搜索模式: ${searchMode}`);
 }
 
+const EDUCATION_LABELS = {
+  low: "低",
+  mid: "中",
+  high: "高",
+  elite: "极高",
+  expert: "专家",
+};
+
+const PERSONALITY_HINTS = {
+  gentle: "极度温柔、柔和、体贴",
+  soft: "偏温柔、好说话",
+  balanced: "性格中性、有棱有角但不极端",
+  spicy: "偏泼辣、直来直去、爱呛人",
+  fierce: "极度泼辣、嘴硬、火力全开",
+};
+
+const PERSONALITY_LABELS = {
+  gentle: "温柔",
+  soft: "偏温柔",
+  balanced: "中性",
+  spicy: "偏泼辣",
+  fierce: "泼辣",
+};
+
+const OPENNESS_HINTS = {
+  conservative: "极度保守、传统、谨慎",
+  cautious: "偏保守、务实、警惕新潮",
+  neutral: "立场中性、视情况而定",
+  open: "偏开放、好奇、敢尝鲜",
+  radical: "极度开放、前卫、反传统",
+};
+
+const OPENNESS_LABELS = {
+  conservative: "保守",
+  cautious: "偏保守",
+  neutral: "中性",
+  open: "偏开放",
+  radical: "开放",
+};
+
+/**
+ * Random vivid podcast character from a few dials. Uses GEMINI_MODEL (default gemini-3.5-flash).
+ * @param {{ education: string, personality: string, openness: string, expertField?: string }} opts
+ * @returns {Promise<{ name: string, persona: string, languageStyle: string, faction: string, backstory: string, defaultEmotion: string, speed: number }>}
+ */
+export async function generateRandomCharacter(opts = {}) {
+  const education = EDUCATION_LABELS[opts.education] ? opts.education : "mid";
+  const personality = PERSONALITY_HINTS[opts.personality] ? opts.personality : "balanced";
+  const openness = OPENNESS_HINTS[opts.openness] ? opts.openness : "neutral";
+  const expertField = String(opts.expertField || "").trim();
+
+  if (education === "expert" && !expertField) {
+    throw new Error("选择「专家」时必须填写具体领域");
+  }
+
+  const eduLabel =
+    education === "expert"
+      ? `专家（领域：${expertField}）`
+      : EDUCATION_LABELS[education];
+  const eduHint =
+    education === "expert"
+      ? `该角色是「${expertField}」领域的专家：知识深度、术语习惯、举例方式都要贴合该领域，但不要堆砌不可懂的黑话`
+      : "体现为知识面、用词习惯、论证方式，不要写成学历证书";
+
+  const temperHint = PERSONALITY_HINTS[personality];
+  const campHint = OPENNESS_HINTS[openness];
+
+  const prompt =
+    `你是播客角色设定助手。请根据下列约束，随机创造一个「性格鲜明、适合播客对谈」的中文角色。\n\n` +
+    `约束：\n` +
+    `- 受教育程度：${eduLabel}（${eduHint}）\n` +
+    `- 性格（温柔 → 泼辣）：${PERSONALITY_LABELS[personality]}，整体气质应接近「${temperHint}」\n` +
+    `- 阵营（保守 → 开放）：${OPENNESS_LABELS[openness]}，观点立场应接近「${campHint}」\n\n` +
+    `要求：\n` +
+    `- 角色要具体、有记忆点，避免模板脸与空话\n` +
+    `- 名字像真人常用名或有辨识度的网名，不要「小明」「AI助手」这类\n` +
+    `- persona / languageStyle / faction 各写 1～2 句，信息密度高\n` +
+    `- backstory（过往经历）写 2～4 句，具体可感，能解释其性格与立场从何而来` +
+    (education === "expert" ? `；经历须与「${expertField}」相关\n` : `\n`) +
+    `- defaultEmotion 用短词（如：热情、冷峻、戏谑）\n` +
+    `- speed 取 0.85～1.2 之间、符合性格的语速倍率（数字）\n` +
+    `- 不要生成头像、不要生成音色 ID\n\n` +
+    `只输出一个 JSON 对象，不要 markdown 围栏，不要其它说明。字段：\n` +
+    `{"name":"...","persona":"...","languageStyle":"...","faction":"...","backstory":"...","defaultEmotion":"...","speed":1}`;
+
+  const apiKey = requireApiKey();
+  const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
+  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 1.1,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`随机角色生成失败 (${res.status}): ${detail.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const raw = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p?.text || "")
+    .join("")
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  } catch {
+    throw new Error("模型返回的角色 JSON 无法解析");
+  }
+
+  const speed = Number(parsed.speed);
+  return {
+    name: String(parsed.name || "").trim() || "未命名角色",
+    persona: String(parsed.persona || "").trim(),
+    languageStyle: String(parsed.languageStyle || "").trim(),
+    faction: String(parsed.faction || "").trim(),
+    backstory: String(parsed.backstory || "").trim(),
+    defaultEmotion: String(parsed.defaultEmotion || "").trim(),
+    speed: Number.isFinite(speed) && speed >= 0.5 && speed <= 2 ? Math.round(speed * 100) / 100 : 1,
+  };
+}
+
+/**
+ * Polish / complete a character draft from whatever the user already filled in.
+ * Does not touch avatar or voiceId.
+ * @param {Record<string, unknown>} draft
+ */
+export async function polishCharacter(draft = {}) {
+  const filled = {
+    name: String(draft.name || "").trim(),
+    persona: String(draft.persona || "").trim(),
+    languageStyle: String(draft.languageStyle || "").trim(),
+    faction: String(draft.faction || "").trim(),
+    backstory: String(draft.backstory || "").trim(),
+    defaultEmotion: String(draft.defaultEmotion || "").trim(),
+    speed: Number(draft.speed),
+  };
+
+  const hasAny =
+    filled.name ||
+    filled.persona ||
+    filled.languageStyle ||
+    filled.faction ||
+    filled.backstory ||
+    filled.defaultEmotion;
+  if (!hasAny) {
+    throw new Error("请先至少填写一点角色信息，再进行 AI 润色");
+  }
+
+  const lines = [];
+  if (filled.name) lines.push(`- name: ${filled.name}`);
+  else lines.push(`- name: （空，请补全）`);
+  if (filled.persona) lines.push(`- persona: ${filled.persona}`);
+  else lines.push(`- persona: （空，请补全）`);
+  if (filled.languageStyle) lines.push(`- languageStyle: ${filled.languageStyle}`);
+  else lines.push(`- languageStyle: （空，请补全）`);
+  if (filled.faction) lines.push(`- faction: ${filled.faction}`);
+  else lines.push(`- faction: （空，请补全）`);
+  if (filled.backstory) lines.push(`- backstory: ${filled.backstory}`);
+  else lines.push(`- backstory: （空，请补全）`);
+  if (filled.defaultEmotion) lines.push(`- defaultEmotion: ${filled.defaultEmotion}`);
+  else lines.push(`- defaultEmotion: （空，请补全）`);
+  if (Number.isFinite(filled.speed) && filled.speed > 0) {
+    lines.push(`- speed: ${filled.speed}（可微调到更贴合性格）`);
+  } else {
+    lines.push(`- speed: （空，请给 0.85～1.2 的语速倍率）`);
+  }
+
+  const prompt =
+    `你是播客角色设定润色助手。用户已写下一些字段（可能残缺、口语化或不自洽），请在保留其核心意图的前提下润色并补全。\n\n` +
+    `当前草稿：\n${lines.join("\n")}\n\n` +
+    `规则：\n` +
+    `- 已填写的内容：润色得更自洽、具体、有播客对谈可用的信息密度；不要推翻用户原意，可小幅升华与衔接\n` +
+    `- 空字段：根据已有信息合理补全，使角色完整鲜明\n` +
+    `- persona / languageStyle / faction 各 1～2 句；backstory 2～4 句；defaultEmotion 用短词\n` +
+    `- speed 取 0.85～1.2 之间数字\n` +
+    `- 不要生成头像、不要生成音色 ID，也不要输出这些字段\n` +
+    `- 名字若已有则尽量保留（可轻微润色）；若为空则起一个合适名字\n\n` +
+    `只输出一个 JSON 对象，不要 markdown 围栏，不要其它说明。字段：\n` +
+    `{"name":"...","persona":"...","languageStyle":"...","faction":"...","backstory":"...","defaultEmotion":"...","speed":1}`;
+
+  const apiKey = requireApiKey();
+  const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
+  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.85,
+        responseMimeType: "application/json",
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`AI 润色失败 (${res.status}): ${detail.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const raw = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p?.text || "")
+    .join("")
+    .trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  } catch {
+    throw new Error("模型返回的润色结果无法解析");
+  }
+
+  const speed = Number(parsed.speed);
+  return {
+    name: String(parsed.name || "").trim() || filled.name || "未命名角色",
+    persona: String(parsed.persona || "").trim(),
+    languageStyle: String(parsed.languageStyle || "").trim(),
+    faction: String(parsed.faction || "").trim(),
+    backstory: String(parsed.backstory || "").trim(),
+    defaultEmotion: String(parsed.defaultEmotion || "").trim(),
+    speed: Number.isFinite(speed) && speed >= 0.5 && speed <= 2 ? Math.round(speed * 100) / 100 : filled.speed || 1,
+  };
+}
+
 export { SEARCH_HEADINGS };

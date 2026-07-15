@@ -66,7 +66,7 @@ export function ChatsPanel({ characters }: { characters: Character[] }) {
               options={SCRIPT_MODELS.map((m) => ({ value: m.id, label: m.label }))}
             />
           </label>
-          <div className="actions">
+          <div className="actions end">
             <button className="primary" disabled={pickedIds.length === 0} onClick={handleCreate}>
               开始聊天
             </button>
@@ -88,7 +88,7 @@ export function ChatsPanel({ characters }: { characters: Character[] }) {
                   <strong>{c.title}</strong>
                   <div className="muted small">{c.messages.length} 条消息</div>
                 </div>
-                <div className="actions" onClick={(ev) => ev.stopPropagation()}>
+                <div className="actions end" onClick={(ev) => ev.stopPropagation()}>
                   <button className="danger" onClick={() => handleDelete(c.id)}>删除</button>
                 </div>
               </li>

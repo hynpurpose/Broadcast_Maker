@@ -322,8 +322,13 @@ export function PodcastPlayer({
 
       {error && <p className="error">⚠ {error}</p>}
 
-      <audio ref={audioRef} controls onEnded={onEnded} onPause={() => setPlaying(false)}
-        onPlay={() => setPlaying(true)} className="player" />
+      <audio
+        ref={audioRef}
+        onEnded={onEnded}
+        onPause={() => setPlaying(false)}
+        onPlay={() => setPlaying(true)}
+        style={{ display: "none" }}
+      />
 
       <ScriptView
         script={episode.script}

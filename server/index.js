@@ -9,7 +9,7 @@ import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, 
 import { generateChatReplies } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
-import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls } from "./gemini.js";
+import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls, generateRandomCharacter, polishCharacter } from "./gemini.js";
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from "./checkpoint.js";
 
 // In-memory generation progress, keyed by episode id (for the poll endpoint).
@@ -72,6 +72,26 @@ app.delete("/api/characters/:id", async (req, res) => {
   const next = characters.filter((c) => c.id !== req.params.id);
   await saveCharacters(next);
   res.status(204).end();
+});
+
+/** Generate a draft character (not saved) from education / personality / openness dials. */
+app.post("/api/characters/random", async (req, res) => {
+  try {
+    const draft = await generateRandomCharacter(req.body || {});
+    res.json(draft);
+  } catch (e) {
+    res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+  }
+});
+
+/** Polish / complete a character draft (not saved). Leaves avatar & voiceId alone on the client. */
+app.post("/api/characters/polish", async (req, res) => {
+  try {
+    const draft = await polishCharacter(req.body || {});
+    res.json(draft);
+  } catch (e) {
+    res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
+  }
 });
 
 app.post("/api/upload", async (req, res) => {
@@ -590,6 +610,7 @@ function sanitizeCharacter(body = {}) {
     persona: String(body.persona || ""),
     languageStyle: String(body.languageStyle || ""),
     faction: String(body.faction || ""),
+    backstory: String(body.backstory || ""),
     voiceId: String(body.voiceId || "").trim(),
     speed: Number(body.speed) || 1,
     defaultEmotion: String(body.defaultEmotion || ""),

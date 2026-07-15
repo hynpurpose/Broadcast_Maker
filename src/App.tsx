@@ -3,6 +3,7 @@ import type { Character, CharacterDraft } from "./types";
 import { api } from "./api";
 import { CharacterForm } from "./components/CharacterForm";
 import { TtsTester } from "./components/TtsTester";
+import { RandomCharacter } from "./components/RandomCharacter";
 import { EpisodesPanel } from "./components/EpisodesPanel";
 import { ChatsPanel } from "./components/ChatsPanel";
 import { ConfirmDialog } from "./components/ConfirmDialog";
@@ -13,6 +14,7 @@ export function App() {
   const [tab, setTab] = useState<Tab>("characters");
   const [characters, setCharacters] = useState<Character[]>([]);
   const [editing, setEditing] = useState<Character | null>(null);
+  const [formSeed, setFormSeed] = useState<{ key: number; draft: CharacterDraft } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
 
@@ -33,6 +35,7 @@ export function App() {
     if (editing) await api.updateCharacter(editing.id, draft);
     else await api.createCharacter(draft);
     setEditing(null);
+    setFormSeed(null);
     refresh();
   }
 
@@ -71,13 +74,28 @@ export function App() {
 
       {tab === "characters" ? (
         <div className="col">
-          <div className="layout">
+          <div className="layout characters-workspace">
             <section className="col">
-              <CharacterForm editing={editing} onSubmit={handleSubmit} onCancel={() => setEditing(null)} />
+              <CharacterForm
+                editing={editing}
+                seed={formSeed}
+                onSubmit={handleSubmit}
+                onCancel={() => {
+                  setEditing(null);
+                  setFormSeed(null);
+                }}
+                onClear={() => setFormSeed(null)}
+              />
             </section>
 
             <section className="col">
               <TtsTester characters={characters} />
+              <RandomCharacter
+                onGenerated={(draft) => {
+                  setEditing(null);
+                  setFormSeed({ key: Date.now(), draft });
+                }}
+              />
             </section>
           </div>
 
@@ -111,7 +129,14 @@ export function App() {
                     </div>
 
                     <div className="char-card-actions">
-                      <button onClick={() => setEditing(c)}>编辑</button>
+                      <button
+                        onClick={() => {
+                          setFormSeed(null);
+                          setEditing(c);
+                        }}
+                      >
+                        编辑
+                      </button>
                       <button className="danger" onClick={() => requestDeleteCharacter(c.id)}>
                         删除
                       </button>

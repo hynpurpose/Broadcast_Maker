@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Character } from "../types";
 import { api } from "../api";
 import { Select } from "./Select";
+import { AudioBar } from "./AudioBar";
 
 const MARKUP_HINTS = ["[pause]", "[long pause]", "[emphasis]", "[laughing]", "[whispering]", "[sad]", "[angry]"];
 
@@ -34,7 +35,7 @@ export function TtsTester({ characters }: { characters: Character[] }) {
   }
 
   const selectOptions = [
-    { value: "", label: "默认音色（.env 中的 reference_id）" },
+    { value: "", label: "默认音色" },
     ...characters.map((c) => ({
       value: c.id,
       label: c.name + (c.voiceId ? "" : "（未绑定音色）"),
@@ -44,10 +45,10 @@ export function TtsTester({ characters }: { characters: Character[] }) {
 
   return (
     <div className="card form">
-      <h2>试听（Fish Audio）</h2>
+      <h2>试听</h2>
 
       <label>
-        用哪个角色的音色
+        音色
         <Select
           value={voiceId}
           onChange={setVoiceId}
@@ -56,7 +57,7 @@ export function TtsTester({ characters }: { characters: Character[] }) {
       </label>
 
       <label>
-        台词（可嵌入 Fish S2 标签）
+        台词
         <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} />
       </label>
 
@@ -68,14 +69,14 @@ export function TtsTester({ characters }: { characters: Character[] }) {
         ))}
       </div>
 
-      <div className="actions">
+      <div className="actions end">
         <button className="primary" onClick={speak} disabled={loading || !text.trim()}>
           {loading ? "合成中…" : "▶ 合成并播放"}
         </button>
       </div>
 
       {error && <p className="error">⚠ {error}</p>}
-      {audioUrl && <audio className="player" src={audioUrl} controls autoPlay />}
+      {audioUrl && <AudioBar src={audioUrl} autoPlay downloadName="tts-preview.mp3" />}
     </div>
   );
 }

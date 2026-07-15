@@ -223,6 +223,7 @@ function buildRoster(episode, characters) {
   const describe = (c, role) =>
     `- id: ${c.id}\n  姓名: ${c.name}\n  身份: ${role}\n  性格特点: ${c.persona || "（未设置）"}\n` +
     `  语言特色/口头禅: ${c.languageStyle || "（未设置）"}\n  观点阵营/立场: ${c.faction || "（未设置）"}\n` +
+    `  过往经历: ${c.backstory || "（未设置）"}\n` +
     `  默认情感基调: ${c.defaultEmotion || "（未设置）"}`;
   const roster = [
     host ? describe(host, "主持人") : "（未指定主持人）",
