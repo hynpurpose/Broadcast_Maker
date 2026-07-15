@@ -5,6 +5,7 @@ import { CharacterForm } from "./components/CharacterForm";
 import { TtsTester } from "./components/TtsTester";
 import { EpisodesPanel } from "./components/EpisodesPanel";
 import { ChatsPanel } from "./components/ChatsPanel";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 
 type Tab = "characters" | "episodes" | "chats";
 
@@ -13,6 +14,7 @@ export function App() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [editing, setEditing] = useState<Character | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
 
   async function refresh() {
     try {
@@ -34,7 +36,15 @@ export function App() {
     refresh();
   }
 
-  async function handleDelete(id: string) {
+  function requestDeleteCharacter(id: string) {
+    const c = characters.find((x) => x.id === id);
+    setPendingDelete({ id, name: c?.name?.trim() || "该角色" });
+  }
+
+  async function confirmDeleteCharacter() {
+    if (!pendingDelete) return;
+    const { id } = pendingDelete;
+    setPendingDelete(null);
     await api.deleteCharacter(id);
     if (editing?.id === id) setEditing(null);
     refresh();
@@ -78,15 +88,11 @@ export function App() {
               {characters.map((c) => (
                 <li key={c.id} className={"char-card-container" + (editing?.id === c.id ? " active" : "")}>
                   <div className={"char-card" + (editing?.id === c.id ? " active" : "")}>
-                    {/* Card Header Row */}
                     <div className="char-card-header">
                       <div />
-                      <span className="char-meta">
-                        {c.speed}x
-                      </span>
+                      <span className="char-meta">{c.speed}x</span>
                     </div>
 
-                    {/* Card Body (Avatar + Info) */}
                     <div className="char-card-body">
                       <div className="char-avatar">
                         {c.avatar ? (
@@ -98,22 +104,20 @@ export function App() {
                       <div className="char-info">
                         <h3 className="char-name">
                           {c.name}
-                          <span className="char-name-faction">
-                            {c.faction || "自由人"}
-                          </span>
+                          <span className="char-name-faction">{c.faction || "自由人"}</span>
                         </h3>
                         <p className="char-subtitle">{c.persona || "暂无性格设定"}</p>
                       </div>
                     </div>
 
-                    {/* Action Buttons Row */}
                     <div className="char-card-actions">
                       <button onClick={() => setEditing(c)}>编辑</button>
-                      <button className="danger" onClick={() => handleDelete(c.id)}>删除</button>
+                      <button className="danger" onClick={() => requestDeleteCharacter(c.id)}>
+                        删除
+                      </button>
                     </div>
                   </div>
 
-                  {/* Bottom Peek Layer */}
                   {c.languageStyle && (
                     <div className="char-card-peek">
                       <span>💬 {c.languageStyle}</span>
@@ -128,6 +132,15 @@ export function App() {
         <EpisodesPanel characters={characters} />
       ) : (
         <ChatsPanel characters={characters} />
+      )}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="删除角色"
+          message={`确定删除角色「${pendingDelete.name}」？此操作不可撤销。`}
+          onConfirm={confirmDeleteCharacter}
+          onCancel={() => setPendingDelete(null)}
+        />
       )}
     </div>
   );

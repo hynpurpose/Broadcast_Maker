@@ -150,8 +150,32 @@ export function CharacterForm({
         </label>
         <label className="narrow">
           语速
-          <input type="number" step={0.05} min={0.5} max={2} value={draft.speed}
-            onChange={(e) => set("speed", Number(e.target.value) || 1)} />
+          <div className="number-stepper">
+            <input
+              type="number"
+              step={0.05}
+              min={0.5}
+              max={2}
+              value={draft.speed}
+              onChange={(e) => set("speed", Number(e.target.value) || 1)}
+            />
+            <div className="number-stepper-btns" aria-hidden="true">
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => set("speed", Math.min(2, Math.round((draft.speed + 0.05) * 100) / 100))}
+              >
+                <svg viewBox="0 0 10 6" width="10" height="6" fill="currentColor"><path d="M5 0L10 6H0z" /></svg>
+              </button>
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => set("speed", Math.max(0.5, Math.round((draft.speed - 0.05) * 100) / 100))}
+              >
+                <svg viewBox="0 0 10 6" width="10" height="6" fill="currentColor"><path d="M0 0h10L5 6z" /></svg>
+              </button>
+            </div>
+          </div>
         </label>
       </div>
 

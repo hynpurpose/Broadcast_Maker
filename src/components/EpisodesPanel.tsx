@@ -4,6 +4,7 @@ import { api } from "../api";
 import { SCRIPT_MODELS, SEARCH_MODES } from "../constants";
 import { EpisodeForm } from "./EpisodeForm";
 import { PodcastPlayer } from "./PodcastPlayer";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 const modelLabel = (id: string) =>
   SCRIPT_MODELS.find((m) => m.id === id)?.label || SCRIPT_MODELS[0].label;
@@ -48,6 +49,7 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<GenProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function stopPolling() {
@@ -131,7 +133,15 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
     refresh();
   }
 
-  async function handleDelete(id: string) {
+  function requestDelete(id: string) {
+    const ep = episodes.find((x) => x.id === id);
+    setPendingDelete({ id, title: ep?.title?.trim() || "未命名节目" });
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const { id } = pendingDelete;
+    setPendingDelete(null);
     await api.deleteEpisode(id);
     if (selectedId === id) setSelectedId(null);
     if (editing?.id === id) setEditing(null);
@@ -191,165 +201,172 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
   }
 
   return (
-    <div className="layout">
-      <section className="col">
-        <EpisodeForm
-          editing={editing}
-          characters={characters}
-          episodes={episodes}
-          onSubmit={handleSubmit}
-          onCancel={() => setEditing(null)}
-        />
+    <div className="col">
+      <div className="layout">
+        <section className="col">
+          <EpisodeForm
+            editing={editing}
+            characters={characters}
+            episodes={episodes}
+            onSubmit={handleSubmit}
+            onCancel={() => setEditing(null)}
+          />
+        </section>
 
-        <div className="card">
-          <h2>节目列表（{episodes.length}）</h2>
-          {episodes.length === 0 && <p className="muted">还没有节目，先新建一期。</p>}
-          <div className="episode-list">
-            {episodes.map((e) => {
-              const isSelected = e.id === selectedId;
-              const isReady = e.status === "script_ready";
-              const badge = searchBadge(episodeSearchMode(e));
-              const dateStr = new Date(e.createdAt || Date.now()).toLocaleDateString("zh-CN", {
-                month: "short",
-                day: "numeric"
-              });
-
-              return (
-                <div
-                  key={e.id}
-                  className={"episode-card" + (isSelected ? " active" : "")}
-                  onClick={() => setSelectedId(e.id)}
-                >
-                  {/* Left badge */}
-                  <div className={"ep-badge " + (isReady ? "ready" : "draft")}>
-                    <span className="ep-badge-status">{isReady ? "READY" : "DRAFT"}</span>
-                    <span className="ep-badge-duration">{e.durationMinutes}</span>
-                    <span className="ep-badge-unit">MINS</span>
-                  </div>
-
-                  {/* Center info */}
-                  <div className="ep-info">
-                    <h3 className="ep-title">{e.title || "（未命名节目）"}</h3>
-                    <p className="ep-topic">{e.topic || "暂无主题描述"}</p>
-                    {hasResumableCheckpoint(e) && (
-                      <p className="ep-topic" style={{ color: "var(--accent, #c45)" }}>
-                        ⏸ {checkpointHint(e)}
-                      </p>
-                    )}
-                    <div className="ep-meta">
-                      <span className="ep-meta-item">
-                        🤖 {e.model === "claude-opus-4-8" ? "Opus" : "Sonnet"}
-                      </span>
-                      <span className="ep-meta-item">
-                        👥 嘉宾 {e.guestIds.length} 位
-                      </span>
-                      {badge && (
-                        <span className="ep-meta-item">
-                          {badge}
-                        </span>
-                      )}
-                      <span className="ep-meta-item date">
-                        📅 {dateStr}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Right actions */}
-                  <div className="ep-actions" onClick={(ev) => ev.stopPropagation()}>
-                    <button className={isSelected ? "primary" : ""} onClick={() => setEditing(e)}>
-                      编辑
+        <section className="col">
+          <div className="card">
+            <h2>脚本</h2>
+            {!selected && <p className="muted">从下方选择一期节目。</p>}
+            {selected && (
+              <>
+                <div className="gen-row">
+                  <button
+                    className="primary"
+                    onClick={() => handleGenerate(selected.id, false)}
+                    disabled={generatingId === selected.id}
+                  >
+                    {generatingId === selected.id
+                      ? progressText(progress, episodeSearchMode(selected))
+                      : hasResumableCheckpoint(selected)
+                      ? "▶ 继续生成"
+                      : selected.script
+                      ? "↻ 重新生成脚本"
+                      : "✦ 生成脚本"}
+                  </button>
+                  {hasResumableCheckpoint(selected) && generatingId !== selected.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm("将丢弃已保存的生成进度（含已写完的段落），从头重来？")) {
+                          handleGenerate(selected.id, true);
+                        }
+                      }}
+                    >
+                      从头重来
                     </button>
-                    <button className="danger" onClick={() => handleDelete(e.id)}>
-                      删除
+                  )}
+                  {!hasResumableCheckpoint(selected) && selected.script && generatingId !== selected.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm("将清空当前脚本并重新生成？")) {
+                          handleGenerate(selected.id, true);
+                        }
+                      }}
+                    >
+                      从头重来
                     </button>
-                  </div>
+                  )}
+                  <span className="muted small">
+                    {modelLabel(selected.model)}
+                    {episodeSearchMode(selected) !== "off" &&
+                      ` · ${searchModeLabel(episodeSearchMode(selected))}`}
+                    {hasResumableCheckpoint(selected) && ` · ${checkpointHint(selected)}`}
+                  </span>
                 </div>
-              );
-            })}
+                {selected.status !== "script_ready" && selected.script?.segments?.length ? (
+                  <p className="muted small">已保存部分脚本（{selected.script.segments.length} 句），可继续生成剩余段落。</p>
+                ) : null}
+                {error && <p className="error">⚠ {error}</p>}
+                {selected.searchSources && selected.searchSources.length > 0 && (
+                  <div className="sources">
+                    <div className="muted small">参考来源（Gemini 联网）：</div>
+                    <ul>
+                      {selected.searchSources.map((s, i) => (
+                        <li key={i}>
+                          <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {selected.script ? (
+                  <PodcastPlayer
+                    episode={selected}
+                    characters={characters}
+                    onSaveSegment={(index, patch) => handleSaveSegment(selected.id, index, patch)}
+                  />
+                ) : (
+                  <p className="muted">还没有脚本。指定好主持人和至少一位嘉宾后点「生成脚本」。</p>
+                )}
+              </>
+            )}
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
 
-      <section className="col">
-        <div className="card">
-          <h2>脚本</h2>
-          {!selected && <p className="muted">从左侧选择一期节目。</p>}
-          {selected && (
-            <>
-              <div className="gen-row">
-                <button
-                  className="primary"
-                  onClick={() => handleGenerate(selected.id, false)}
-                  disabled={generatingId === selected.id}
-                >
-                  {generatingId === selected.id
-                    ? progressText(progress, episodeSearchMode(selected))
-                    : hasResumableCheckpoint(selected)
-                    ? "▶ 继续生成"
-                    : selected.script
-                    ? "↻ 重新生成脚本"
-                    : "✦ 生成脚本"}
-                </button>
-                {hasResumableCheckpoint(selected) && generatingId !== selected.id && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (confirm("将丢弃已保存的生成进度（含已写完的段落），从头重来？")) {
-                        handleGenerate(selected.id, true);
-                      }
-                    }}
-                  >
-                    从头重来
-                  </button>
-                )}
-                {!hasResumableCheckpoint(selected) && selected.script && generatingId !== selected.id && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (confirm("将清空当前脚本并重新生成？")) {
-                        handleGenerate(selected.id, true);
-                      }
-                    }}
-                  >
-                    从头重来
-                  </button>
-                )}
-                <span className="muted small">
-                  {modelLabel(selected.model)}
-                  {episodeSearchMode(selected) !== "off" &&
-                    ` · ${searchModeLabel(episodeSearchMode(selected))}`}
-                  {hasResumableCheckpoint(selected) && ` · ${checkpointHint(selected)}`}
+      <div className="card">
+        <h2>节目列表（{episodes.length}）</h2>
+        {episodes.length === 0 && <p className="muted">还没有节目，先新建一期。</p>}
+        <div className="episode-list">
+          {episodes.map((e) => {
+            const isSelected = e.id === selectedId;
+            const isReady = e.status === "script_ready";
+            const badge = searchBadge(episodeSearchMode(e));
+            const dateStr = new Date(e.createdAt || Date.now()).toLocaleDateString("zh-CN", {
+              month: "short",
+              day: "numeric",
+            });
+
+            return (
+              <div
+                key={e.id}
+                className={"episode-card" + (isSelected ? " active" : "") + (isReady ? " is-ready" : " is-draft")}
+                onClick={() => setSelectedId(e.id)}
+              >
+                <span className={"ep-card-status " + (isReady ? "ready" : "draft")}>
+                  {isReady ? "READY" : "DRAFT"}
                 </span>
-              </div>
-              {selected.status !== "script_ready" && selected.script?.segments?.length ? (
-                <p className="muted small">已保存部分脚本（{selected.script.segments.length} 句），可继续生成剩余段落。</p>
-              ) : null}
-              {error && <p className="error">⚠ {error}</p>}
-              {selected.searchSources && selected.searchSources.length > 0 && (
-                <div className="sources">
-                  <div className="muted small">参考来源（Gemini 联网）：</div>
-                  <ul>
-                    {selected.searchSources.map((s, i) => (
-                      <li key={i}>
-                        <a href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
-                      </li>
-                    ))}
-                  </ul>
+
+                <div className={"ep-badge " + (isReady ? "ready" : "draft")}>
+                  <div className="ep-badge-main">
+                    <span className="ep-badge-duration">{e.durationMinutes}</span>
+                    <span className="ep-badge-unit">MIN</span>
+                  </div>
                 </div>
-              )}
-              {selected.script ? (
-                <PodcastPlayer
-                  episode={selected}
-                  characters={characters}
-                  onSaveSegment={(index, patch) => handleSaveSegment(selected.id, index, patch)}
-                />
-              ) : (
-                <p className="muted">还没有脚本。指定好主持人和至少一位嘉宾后点「生成脚本」。</p>
-              )}
-            </>
-          )}
+
+                <div className="ep-info">
+                  <h3 className="ep-title">{e.title || "（未命名节目）"}</h3>
+                  <p className="ep-topic">{e.topic || "暂无主题描述"}</p>
+                  {hasResumableCheckpoint(e) && (
+                    <p className="ep-topic ep-topic-checkpoint">
+                      ⏸ {checkpointHint(e)}
+                    </p>
+                  )}
+                  <div className="ep-meta">
+                    <span className="ep-meta-item">
+                      🤖 {e.model === "claude-opus-4-8" ? "Opus" : "Sonnet"}
+                    </span>
+                    <span className="ep-meta-item">
+                      👥 嘉宾 {e.guestIds.length} 位
+                    </span>
+                    {badge && <span className="ep-meta-item">{badge}</span>}
+                    <span className="ep-meta-item date">📅 {dateStr}</span>
+                  </div>
+                </div>
+
+                <div className="ep-actions" onClick={(ev) => ev.stopPropagation()}>
+                  <button className={isSelected ? "primary" : ""} onClick={() => setEditing(e)}>
+                    编辑
+                  </button>
+                  <button className="danger" onClick={() => requestDelete(e.id)}>
+                    删除
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      </section>
+      </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="删除节目"
+          message={`确定删除节目「${pendingDelete.title}」？此操作不可撤销。`}
+          onConfirm={confirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </div>
   );
 }

@@ -4,6 +4,32 @@ import { api } from "../api";
 import { ScriptView, type SegStatus } from "./ScriptView";
 
 const PREFETCH_AHEAD = 2; // 提前预取后面几段
+/** Fish Audio 当前档位并发上限；预缓存 / 导出按此并行拉 TTS */
+const TTS_CONCURRENCY = 5;
+
+/** 有限并发跑完 list，结果按原下标排列；每完成一项回调 onDone。 */
+async function mapPool<T>(
+  count: number,
+  concurrency: number,
+  worker: (index: number) => Promise<T>,
+  onDone?: (done: number) => void
+): Promise<T[]> {
+  const results = new Array<T>(count);
+  let next = 0;
+  let done = 0;
+  async function run() {
+    while (true) {
+      const i = next++;
+      if (i >= count) return;
+      results[i] = await worker(i);
+      done += 1;
+      onDone?.(done);
+    }
+  }
+  const n = Math.min(Math.max(1, concurrency), count);
+  await Promise.all(Array.from({ length: n }, () => run()));
+  return results;
+}
 
 export function PodcastPlayer({
   episode,
@@ -168,15 +194,19 @@ export function PodcastPlayer({
     setPrewarmFailed(0);
     let failed = 0;
     try {
-      for (let i = 0; i < n; i++) {
-        try {
-          await ensureAudio(i);
-        } catch {
-          failed += 1;
-          setPrewarmFailed(failed);
-        }
-        setPrewarmDone(i + 1);
-      }
+      await mapPool(
+        n,
+        TTS_CONCURRENCY,
+        async (i) => {
+          try {
+            await ensureAudio(i);
+          } catch {
+            failed += 1;
+            setPrewarmFailed(failed);
+          }
+        },
+        (done) => setPrewarmDone(done)
+      );
       if (failed > 0) {
         setError(`预缓存完成，但有 ${failed} 段失败（红点）。导出前请重试失败段或点「预缓存全部」。`);
       }
@@ -191,22 +221,25 @@ export function PodcastPlayer({
     setExporting(true);
     setExportDone(0);
     try {
-      const parts: ArrayBuffer[] = [];
-      for (let i = 0; i < n; i++) {
-        try {
-          const url = await ensureAudio(i);
-          const buf = await fetch(url).then((r) => {
-            if (!r.ok) throw new Error(`读取第 ${i + 1} 段音频失败`);
-            return r.arrayBuffer();
-          });
-          parts.push(buf);
-        } catch (e) {
-          throw new Error(
-            `第 ${i + 1} 段无法导出：${e instanceof Error ? e.message : e}`
-          );
-        }
-        setExportDone(i + 1);
-      }
+      const parts = await mapPool(
+        n,
+        TTS_CONCURRENCY,
+        async (i) => {
+          try {
+            const url = await ensureAudio(i);
+            const buf = await fetch(url).then((r) => {
+              if (!r.ok) throw new Error(`读取第 ${i + 1} 段音频失败`);
+              return r.arrayBuffer();
+            });
+            return buf;
+          } catch (e) {
+            throw new Error(
+              `第 ${i + 1} 段无法导出：${e instanceof Error ? e.message : e}`
+            );
+          }
+        },
+        (done) => setExportDone(done)
+      );
       const blob = new Blob(parts, { type: "audio/mpeg" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

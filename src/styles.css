@@ -278,7 +278,70 @@ textarea {
 }
 
 .narrow {
-  width: 90px;
+  width: 100px;
+}
+
+/* Custom number stepper — larger hit targets than browser spin buttons */
+.number-stepper {
+  position: relative;
+  margin-top: 6px;
+}
+
+.number-stepper input {
+  margin-top: 0;
+  padding-right: 32px;
+  /* hide native spinners */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.number-stepper input::-webkit-outer-spin-button,
+.number-stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.number-stepper-btns {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
+  width: 28px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  border-radius: 0 9px 9px 0;
+  overflow: hidden;
+}
+
+.number-stepper-btns button {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.number-stepper-btns button + button {
+  border-top: 1px solid var(--border);
+}
+
+.number-stepper-btns button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.number-stepper-btns button:active {
+  background: var(--accent-light);
+  color: var(--accent);
 }
 
 /* Buttons */
@@ -1109,16 +1172,18 @@ button.mini:hover {
 }
 
 .episode-card {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 16px;
+  padding: 18px 18px 16px;
   background: var(--panel);
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 16px;
   cursor: pointer;
   box-shadow: var(--shadow);
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
 }
 
 .episode-card:hover {
@@ -1131,11 +1196,35 @@ button.mini:hover {
   box-shadow: 0 0 16px rgba(59, 130, 246, 0.15);
 }
 
+/* Status tag on the whole card's top-left corner */
+.ep-card-status {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 4px 10px 5px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  border-radius: 0 0 10px 0;
+  z-index: 1;
+}
+
+.ep-card-status.draft {
+  background: rgba(59, 130, 246, 0.9);
+  color: #eff6ff;
+}
+
+.ep-card-status.ready {
+  background: rgba(16, 185, 129, 0.9);
+  color: #ecfdf5;
+}
+
 /* Left Badge in Card */
 .ep-badge {
-  width: 76px;
-  height: 76px;
-  border-radius: 12px;
+  width: 54px;
+  height: 54px;
+  border-radius: 10px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -1148,13 +1237,13 @@ button.mini:hover {
 .ep-badge.draft {
   background: rgba(59, 130, 246, 0.08);
   border: 1.5px solid rgba(59, 130, 246, 0.2);
-  color: #60a5fa;
+  color: #93c5fd;
 }
 
 .ep-badge.ready {
   background: rgba(16, 185, 129, 0.08);
   border: 1.5px solid rgba(16, 185, 129, 0.2);
-  color: #34d399;
+  color: #6ee7b7;
 }
 
 .episode-card.active .ep-badge.draft {
@@ -1167,26 +1256,30 @@ button.mini:hover {
   border-color: var(--success);
 }
 
-.ep-badge-status {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  opacity: 0.8;
-  margin-bottom: 2px;
+.ep-badge-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1;
 }
 
 .ep-badge-duration {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 800;
   font-family: 'Outfit', sans-serif;
-  line-height: 1.1;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: #ffffff;
 }
 
 .ep-badge-unit {
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.05em;
-  opacity: 0.7;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+  margin-top: 1px;
 }
 
 /* Center Info in Card */
@@ -1203,16 +1296,21 @@ button.mini:hover {
   font-weight: 600;
   color: #ffffff;
   font-family: 'Outfit', sans-serif;
+  word-break: break-word;
 }
 
 .ep-topic {
   margin: 0 0 8px 0;
   font-size: 13px;
   color: var(--muted);
-  line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.45;
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+}
+
+.ep-topic-checkpoint {
+  color: var(--accent);
 }
 
 .ep-meta {
@@ -1239,13 +1337,63 @@ button.mini:hover {
 /* Right Actions in Card */
 .ep-actions {
   display: flex;
-  gap: 8px;
+  flex-direction: row;
+  gap: 10px;
   flex-shrink: 0;
 }
 
 .ep-actions button {
-  padding: 8px 12px;
-  font-size: 12px;
+  padding: 12px 20px;
+  min-width: 88px;
+  font-size: 14px;
   font-weight: 600;
-  border-radius: 8px;
+  border-radius: 10px;
+}
+
+/* In-app delete confirmation (window.confirm is unreliable in some browsers) */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+}
+
+.confirm-dialog {
+  width: min(400px, 100%);
+  padding: 22px 22px 18px;
+  background: var(--panel);
+  border: 1px solid var(--border-hover);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.confirm-dialog h3 {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 700;
+}
+
+.confirm-dialog p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.confirm-dialog-actions button {
+  min-width: 88px;
+  padding: 10px 16px;
 }
