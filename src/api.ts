@@ -1,4 +1,4 @@
-import type { Character, CharacterDraft, Chat, ChatMessage, Episode, EpisodeDraft, GenProgress } from "./types";
+import type { Character, CharacterDraft, Chat, ChatDraft, ChatMessage, Episode, EpisodeDraft, GenProgress, LearningPlan } from "./types";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
@@ -157,7 +157,7 @@ export const api = {
 
   listChats: () => fetch("/api/chats").then((r) => json<Chat[]>(r)),
 
-  createChat: (draft: { title?: string; participantIds: string[]; model: string }) =>
+  createChat: (draft: ChatDraft) =>
     fetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -168,6 +168,20 @@ export const api = {
     fetch(`/api/chats/${id}`, { method: "DELETE" }).then((r) => {
       if (!r.ok) throw new Error(r.statusText);
     }),
+
+  generateLearningPlan: (id: string) =>
+    fetch(`/api/chats/${id}/learning-plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    }).then((r) => json<{ chat: Chat; plan: LearningPlan }>(r)),
+
+  advanceLearningStep: (id: string, stepIndex?: number) =>
+    fetch(`/api/chats/${id}/learning-step`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(stepIndex === undefined ? {} : { stepIndex }),
+    }).then((r) => json<Chat>(r)),
 
   sendChatMessage: (id: string, text: string, isEndless?: boolean) =>
     fetch(`/api/chats/${id}/message`, {

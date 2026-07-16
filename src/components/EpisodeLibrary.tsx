@@ -129,7 +129,14 @@ export function EpisodeLibrary({
                   <span className="ep-meta-item">
                     {e.model === "claude-opus-4-8" ? "Opus" : "Sonnet"}
                   </span>
-                  <span className="ep-meta-item">嘉宾 {e.guestIds.length}</span>
+                  <span className="ep-meta-item">
+                    {(e.mode || "podcast") === "sitcom" ? "情景剧" : "播客"}
+                  </span>
+                  <span className="ep-meta-item">
+                    {(e.mode || "podcast") === "sitcom"
+                      ? `主演 ${(e.leadActorIds || []).length}`
+                      : `嘉宾 ${(e.guestIds || []).length}`}
+                  </span>
                   {badge && <span className="ep-meta-item">{badge}</span>}
                   <span className="ep-meta-item date">{dateStr}</span>
                 </div>

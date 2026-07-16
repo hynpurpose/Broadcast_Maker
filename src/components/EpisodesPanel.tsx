@@ -316,7 +316,11 @@ export function EpisodesPanel({ characters }: { characters: Character[] }) {
                   </>
                 ) : (
                   <>
-                    <p className="muted">还没有脚本。指定好主持人和至少一位嘉宾后点「生成脚本」。</p>
+                    <p className="muted">
+                      {(selected.mode || "podcast") === "sitcom"
+                        ? "还没有脚本。指定好旁白和至少一位主演后点「生成脚本」。"
+                        : "还没有脚本。指定好主持人和至少一位嘉宾后点「生成脚本」。"}
+                    </p>
                     <button type="button" className="back-to-list below-script" onClick={backToList}>
                       ← 返回节目列表
                     </button>

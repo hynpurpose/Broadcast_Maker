@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import type { Character, Episode, EpisodeDraft, SearchMode } from "../types";
-import { SCRIPT_MODELS, DEFAULT_MODEL, SEARCH_MODES, DEFAULT_SEARCH_MODE } from "../constants";
+import type { Character, Episode, EpisodeDraft, EpisodeMode, SearchMode } from "../types";
+import { EPISODE_MODES, DEFAULT_MODE, SCRIPT_MODELS, DEFAULT_MODEL, SEARCH_MODES, DEFAULT_SEARCH_MODE } from "../constants";
 import { api } from "../api";
 import { Select } from "./Select";
 
 const EMPTY: EpisodeDraft = {
   title: "",
+  mode: DEFAULT_MODE,
   topic: "",
   materials: "",
   materialLinks: "",
@@ -16,6 +17,11 @@ const EMPTY: EpisodeDraft = {
   searchMode: DEFAULT_SEARCH_MODE,
   searchBrief: "",
   basedOnEpisodeIds: [],
+  storyBackground: "",
+  characterRelations: "",
+  narratorId: "",
+  leadActorIds: [],
+  plotDevelopment: "",
 };
 
 function resolveSearchMode(e: Episode & { searchEnabled?: boolean }): SearchMode {
@@ -45,6 +51,7 @@ export function EpisodeForm({
       const { title, topic, materials, durationMinutes, hostId, guestIds, model } = editing;
       setDraft({
         title,
+        mode: editing.mode || DEFAULT_MODE,
         topic,
         materials,
         materialLinks: editing.materialLinks || "",
@@ -55,6 +62,11 @@ export function EpisodeForm({
         searchMode: resolveSearchMode(editing),
         searchBrief: editing.searchBrief || "",
         basedOnEpisodeIds: editing.basedOnEpisodeIds || [],
+        storyBackground: editing.storyBackground || "",
+        characterRelations: editing.characterRelations || "",
+        narratorId: editing.narratorId || "",
+        leadActorIds: editing.leadActorIds || [],
+        plotDevelopment: editing.plotDevelopment || "",
       });
     } else {
       setDraft(EMPTY);
@@ -84,16 +96,31 @@ export function EpisodeForm({
     }));
   }
 
+  function toggleLeadActor(id: string) {
+    setDraft((d) => ({
+      ...d,
+      leadActorIds: d.leadActorIds.includes(id)
+        ? d.leadActorIds.filter((a) => a !== id)
+        : [...d.leadActorIds, id],
+    }));
+  }
+
+  const isSitcom = draft.mode === "sitcom";
+
   async function handlePolishTopic() {
     setPolishError(null);
     setPolishing(true);
     try {
       const result = await api.polishTopic({
-        topic: draft.topic,
+        topic: isSitcom ? draft.plotDevelopment || draft.topic : draft.topic,
         title: draft.title,
         materials: draft.materials,
       });
-      set("topic", result.topic);
+      if (isSitcom) {
+        set("plotDevelopment", result.topic);
+      } else {
+        set("topic", result.topic);
+      }
     } catch (e) {
       setPolishError(String(e instanceof Error ? e.message : e));
     } finally {
@@ -101,7 +128,8 @@ export function EpisodeForm({
     }
   }
 
-  const canPolishTopic = !polishing && Boolean(draft.topic.trim());
+  const polishSource = isSitcom ? draft.plotDevelopment : draft.topic;
+  const canPolishTopic = !polishing && Boolean(polishSource.trim());
   const estWords = draft.durationMinutes * 300;
 
   return (
@@ -115,6 +143,15 @@ export function EpisodeForm({
       <h2>{editing ? "编辑节目" : "新建节目"}</h2>
 
       {polishError && <p className="error">⚠ {polishError}</p>}
+
+      <label>
+        节目模式
+        <Select
+          value={draft.mode}
+          onChange={(val) => set("mode", val as EpisodeMode)}
+          options={EPISODE_MODES.map((m) => ({ value: m.id, label: m.label }))}
+        />
+      </label>
 
       <label>
         节目标题（可留空，让 AI 起）
@@ -142,29 +179,87 @@ export function EpisodeForm({
         </label>
       )}
 
-      <div className="field-block">
-        <div className="field-head">
-          <span>主题</span>
-          <button
-            type="button"
-            className={"ai-polish compact" + (polishing ? " loading" : "")}
-            onClick={handlePolishTopic}
-            disabled={!canPolishTopic}
-            title="润色已写好的主题（保留原意，写得更具体）"
-          >
-            {polishing ? "润色中…" : "AI 润色"}
-          </button>
+      {isSitcom ? (
+        <>
+          <label>
+            故事背景
+            <textarea
+              value={draft.storyBackground}
+              onChange={(e) => set("storyBackground", e.target.value)}
+              rows={3}
+              placeholder="时代、地点、世界观、外部情境……"
+            />
+          </label>
+
+          <label>
+            人物关系
+            <textarea
+              value={draft.characterRelations}
+              onChange={(e) => set("characterRelations", e.target.value)}
+              rows={3}
+              placeholder="谁和谁是什么关系、矛盾点、羁绊……"
+            />
+          </label>
+
+          <div className="field-block">
+            <div className="field-head">
+              <span>情节发展</span>
+              <button
+                type="button"
+                className={"ai-polish compact" + (polishing ? " loading" : "")}
+                onClick={handlePolishTopic}
+                disabled={!canPolishTopic}
+                title="润色已写好的情节（保留原意，写得更具体）"
+              >
+                {polishing ? "润色中…" : "AI 润色"}
+              </button>
+            </div>
+            <textarea
+              value={draft.plotDevelopment}
+              onChange={(e) => {
+                set("plotDevelopment", e.target.value);
+                if (polishError) setPolishError(null);
+              }}
+              rows={4}
+              placeholder="本集要发生什么：起因 → 冲突 → 转折 → 收束"
+            />
+          </div>
+
+          <label>
+            本集主题（可选，一句话概括）
+            <textarea
+              value={draft.topic}
+              onChange={(e) => set("topic", e.target.value)}
+              rows={2}
+              placeholder="例：旧友重逢后的一次试探与和解"
+            />
+          </label>
+        </>
+      ) : (
+        <div className="field-block">
+          <div className="field-head">
+            <span>主题</span>
+            <button
+              type="button"
+              className={"ai-polish compact" + (polishing ? " loading" : "")}
+              onClick={handlePolishTopic}
+              disabled={!canPolishTopic}
+              title="润色已写好的主题（保留原意，写得更具体）"
+            >
+              {polishing ? "润色中…" : "AI 润色"}
+            </button>
+          </div>
+          <textarea
+            value={draft.topic}
+            onChange={(e) => {
+              set("topic", e.target.value);
+              if (polishError) setPolishError(null);
+            }}
+            rows={2}
+            placeholder="本期要聊什么（尽量具体：对象 + 角度）"
+          />
         </div>
-        <textarea
-          value={draft.topic}
-          onChange={(e) => {
-            set("topic", e.target.value);
-            if (polishError) setPolishError(null);
-          }}
-          rows={2}
-          placeholder="本期要聊什么（尽量具体：对象 + 角度）"
-        />
-      </div>
+      )}
 
       <label>
         参考材料（文字要点、数据、观点等）
@@ -190,6 +285,7 @@ export function EpisodeForm({
               <input type="checkbox" checked={draft.basedOnEpisodeIds.includes(e.id)}
                 onChange={() => toggleBasedOn(e.id)} />
               {e.title || "（未命名）"}
+              {(e.mode || "podcast") === "sitcom" ? " · 情景剧" : ""}
             </label>
           ))}
         </fieldset>
@@ -204,33 +300,70 @@ export function EpisodeForm({
         <div className="grow est">≈ {estWords} 字</div>
       </div>
 
-      <label>
-        主持人
-        <Select
-          value={draft.hostId}
-          onChange={(val) => set("hostId", val)}
-          options={[
-            { value: "", label: "— 选择主持人 —" },
-            ...characters.map((c) => ({ value: c.id, label: c.name })),
-          ]}
-        />
-      </label>
+      {isSitcom ? (
+        <>
+          <label>
+            旁白 / 主讲人
+            <Select
+              value={draft.narratorId}
+              onChange={(val) => set("narratorId", val)}
+              options={[
+                { value: "", label: "— 选择旁白 —" },
+                ...characters.map((c) => ({ value: c.id, label: c.name })),
+              ]}
+            />
+          </label>
 
-      <fieldset className="guests">
-        <legend>嘉宾（可多选）</legend>
-        {characters.length === 0 && <p className="muted small">先去「角色库」创建角色。</p>}
-        <div className="guest-grid">
-          {characters.map((c) => (
-            <label key={c.id} className="checkbox" data-disabled={c.id === draft.hostId}>
-              <input type="checkbox" checked={draft.guestIds.includes(c.id)}
-                disabled={c.id === draft.hostId}
-                onChange={() => toggleGuest(c.id)} />
-              {c.name}
-              {c.id === draft.hostId && <span className="muted small">（已是主持人）</span>}
-            </label>
-          ))}
-        </div>
-      </fieldset>
+          <fieldset className="guests">
+            <legend>主演（可多选）</legend>
+            {characters.length === 0 && <p className="muted small">先去「角色库」创建角色。</p>}
+            <div className="guest-grid">
+              {characters.map((c) => (
+                <label key={c.id} className="checkbox" data-disabled={c.id === draft.narratorId}>
+                  <input
+                    type="checkbox"
+                    checked={draft.leadActorIds.includes(c.id)}
+                    disabled={c.id === draft.narratorId}
+                    onChange={() => toggleLeadActor(c.id)}
+                  />
+                  {c.name}
+                  {c.id === draft.narratorId && <span className="muted small">（已是旁白）</span>}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        </>
+      ) : (
+        <>
+          <label>
+            主持人
+            <Select
+              value={draft.hostId}
+              onChange={(val) => set("hostId", val)}
+              options={[
+                { value: "", label: "— 选择主持人 —" },
+                ...characters.map((c) => ({ value: c.id, label: c.name })),
+              ]}
+            />
+          </label>
+
+          <fieldset className="guests">
+            <legend>嘉宾（可多选）</legend>
+            {characters.length === 0 && <p className="muted small">先去「角色库」创建角色。</p>}
+            <div className="guest-grid">
+              {characters.map((c) => (
+                <label key={c.id} className="checkbox" data-disabled={c.id === draft.hostId}>
+                  <input type="checkbox" checked={draft.guestIds.includes(c.id)}
+                    disabled={c.id === draft.hostId}
+                    onChange={() => toggleGuest(c.id)} />
+                  {c.name}
+                  {c.id === draft.hostId && <span className="muted small">（已是主持人）</span>}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        </>
+      )}
 
       <label>
         写稿模型

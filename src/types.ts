@@ -33,6 +33,9 @@ export interface Script {
   truncated?: boolean;
 }
 
+/** 节目模式：播客对谈 / 情景剧 */
+export type EpisodeMode = "podcast" | "sitcom";
+
 export type EpisodeStatus = "draft" | "script_ready";
 
 /** Mid-generation snapshot — survives restarts; used to resume. */
@@ -69,6 +72,8 @@ export interface GenProgress {
 export interface Episode {
   id: string;
   title: string;
+  /** 节目模式，默认 podcast */
+  mode: EpisodeMode;
   topic: string;
   materials: string;
   /** 参考链接，每行一个 URL（写稿前自动抓取） */
@@ -87,6 +92,16 @@ export interface Episode {
   genCheckpoint?: GenCheckpoint | null;
   /** 基于哪些往期节目的内容来延续创作 */
   basedOnEpisodeIds: string[];
+  /** 情景剧模式：故事背景 */
+  storyBackground: string;
+  /** 情景剧模式：人物关系 */
+  characterRelations: string;
+  /** 情景剧模式：旁白/主讲人 ID */
+  narratorId: string;
+  /** 情景剧模式：主演角色 IDs */
+  leadActorIds: string[];
+  /** 情景剧模式：情节发展 */
+  plotDevelopment: string;
   status: EpisodeStatus;
   script: Script | null;
   createdAt: string;
@@ -102,19 +117,95 @@ export interface ChatMessage {
   emotion?: string;
 }
 
+/** 对话模式：闲聊 / 学习 */
+export type ChatMode = "casual" | "learn";
+
+/** 学习计划颗粒度 */
+export type LearningGranularity = "coarse" | "medium" | "fine";
+
+/** 学习者当前水平 */
+export type LearnerLevel = "beginner" | "intermediate" | "advanced";
+
+/** Partner 思维角色（与人设叠加，决定在学习中怎么说话） */
+export type PartnerThinkingStyle =
+  | "challenger"
+  | "analogist"
+  | "pragmatist"
+  | "synthesizer"
+  | "devil";
+
+export interface LearningPlanStep {
+  id: string;
+  title: string;
+  /** 本步要让学习者掌握什么 */
+  objective: string;
+  /** 关键讲解/练习要点 */
+  keyPoints: string[];
+  /** 如何判断本步已掌握（老师用来决定是否推进） */
+  checkHint: string;
+}
+
+export interface LearningPartnerAssignment {
+  characterId: string;
+  thinkingStyle: PartnerThinkingStyle;
+  /** 本计划中该 partner 的具体职责一句话 */
+  duty: string;
+}
+
+export interface LearningPlan {
+  title: string;
+  summary: string;
+  /** 预估对话轮次（约） */
+  estimatedRounds: number;
+  steps: LearningPlanStep[];
+  partnerAssignments: LearningPartnerAssignment[];
+}
+
+export interface LearningConfig {
+  topic: string;
+  materials: string;
+  materialLinks: string;
+  goal: string;
+  granularity: LearningGranularity;
+  learnerLevel: LearnerLevel;
+  teacherId: string;
+  partnerIds: string[];
+  /** partnerId → 思维风格；未填则生成计划时自动分配 */
+  partnerStyles: Record<string, PartnerThinkingStyle>;
+  plan: LearningPlan | null;
+  /** 当前进行到计划第几步（0-based） */
+  currentStepIndex: number;
+  /** 上一轮模型判断：是否可进入下一步 */
+  advanceReady?: boolean;
+  lastStepStatus?: string | null;
+}
+
 export interface Chat {
   id: string;
   title: string;
+  mode: ChatMode;
   participantIds: string[];
   model: string;
   messages: ChatMessage[];
+  /** 仅 mode=learn 时有值 */
+  learning?: LearningConfig | null;
   createdAt: string;
   updatedAt: string;
 }
 
+export type ChatDraft = {
+  title?: string;
+  mode: ChatMode;
+  model: string;
+  /** casual：任意多选；learn：由 teacher + partners 推导 */
+  participantIds?: string[];
+  learning?: Omit<LearningConfig, "plan" | "currentStepIndex">;
+};
+
 export type EpisodeDraft = Pick<
   Episode,
   | "title"
+  | "mode"
   | "topic"
   | "materials"
   | "materialLinks"
@@ -125,4 +216,9 @@ export type EpisodeDraft = Pick<
   | "searchMode"
   | "searchBrief"
   | "basedOnEpisodeIds"
+  | "storyBackground"
+  | "characterRelations"
+  | "narratorId"
+  | "leadActorIds"
+  | "plotDevelopment"
 >;

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import express from "express";
 import cors from "cors";
 import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, saveChats, newId, AUDIO_DIR, DATA_DIR } from "./store.js";
-import { generateChatReplies } from "./chat.js";
+import { generateChatReplies, generateLearningPlan } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
 import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls, generateRandomCharacter, polishCharacter, polishEpisodeTopic } from "./gemini.js";
@@ -137,7 +137,13 @@ app.get("/api/episodes", async (_req, res) => {
       const diskCp = await loadCheckpoint(e.id);
       return {
         ...e,
+        mode: resolveEpisodeMode(e),
         searchMode: resolveSearchMode(e),
+        storyBackground: e.storyBackground || "",
+        characterRelations: e.characterRelations || "",
+        narratorId: e.narratorId || "",
+        leadActorIds: Array.isArray(e.leadActorIds) ? e.leadActorIds : [],
+        plotDevelopment: e.plotDevelopment || "",
         genCheckpoint: diskCp || e.genCheckpoint || null,
       };
     })
@@ -194,10 +200,25 @@ app.post("/api/episodes/:id/generate-script", async (req, res) => {
   const force = Boolean(req.body?.force);
 
   const allCharacters = await listCharacters();
-  const participantIds = new Set([episode.hostId, ...(episode.guestIds || [])].filter(Boolean));
+  const isSitcom = resolveEpisodeMode(episode) === "sitcom";
+  const participantIds = new Set(
+    isSitcom
+      ? [episode.narratorId, ...(episode.leadActorIds || [])].filter(Boolean)
+      : [episode.hostId, ...(episode.guestIds || [])].filter(Boolean)
+  );
   const participants = allCharacters.filter((c) => participantIds.has(c.id));
-  if (!episode.hostId) return res.status(400).json({ error: "请先指定主持人" });
-  if (participants.length < 2) return res.status(400).json({ error: "至少需要主持人 + 1 位嘉宾" });
+  if (isSitcom) {
+    if (!episode.narratorId) return res.status(400).json({ error: "请先指定旁白/主讲人" });
+    if ((episode.leadActorIds || []).length < 1) {
+      return res.status(400).json({ error: "至少需要旁白 + 1 位主演" });
+    }
+    if (participants.length < 2) {
+      return res.status(400).json({ error: "旁白与主演必须是角色库中的有效角色" });
+    }
+  } else {
+    if (!episode.hostId) return res.status(400).json({ error: "请先指定主持人" });
+    if (participants.length < 2) return res.status(400).json({ error: "至少需要主持人 + 1 位嘉宾" });
+  }
 
   const running = genProgress.get(episode.id);
   const busy = running && isActivePhase(running.phase);
@@ -505,26 +526,95 @@ app.get("/api/episodes/:id/export", async (req, res) => {
 
 // --- Chats: real-time multi-character conversations ---
 app.get("/api/chats", async (_req, res) => {
-  res.json(await listChats());
+  const chats = await listChats();
+  res.json(
+    chats.map((c) => ({
+      ...c,
+      mode: c.mode === "learn" ? "learn" : "casual",
+      learning: c.learning || null,
+    }))
+  );
 });
 
 app.post("/api/chats", async (req, res) => {
   const chats = await listChats();
-  const participantIds = Array.isArray(req.body?.participantIds)
-    ? req.body.participantIds.map(String)
-    : [];
-  if (participantIds.length === 0) return res.status(400).json({ error: "至少选择一个角色" });
+  const mode = req.body?.mode === "learn" ? "learn" : "casual";
   const characters = await listCharacters();
-  const names = participantIds
-    .map((id) => characters.find((c) => c.id === id)?.name)
-    .filter(Boolean);
   const now = new Date().toISOString();
+
+  let participantIds = [];
+  let learning = null;
+  let title = String(req.body?.title || "").trim();
+
+  if (mode === "learn") {
+    const body = req.body?.learning || req.body || {};
+    const teacherId = String(body.teacherId || "").trim();
+    const partnerIds = Array.isArray(body.partnerIds)
+      ? [...new Set(body.partnerIds.map(String))].filter((id) => id && id !== teacherId).slice(0, 3)
+      : [];
+    if (!teacherId) return res.status(400).json({ error: "请选择主讲老师" });
+    if (partnerIds.length < 1) return res.status(400).json({ error: "请选择 1~3 位 partner" });
+    if (!characters.some((c) => c.id === teacherId)) {
+      return res.status(400).json({ error: "主讲老师无效" });
+    }
+    if (partnerIds.some((id) => !characters.some((c) => c.id === id))) {
+      return res.status(400).json({ error: "存在无效的 partner" });
+    }
+    const topic = String(body.topic || "").trim();
+    if (!topic) return res.status(400).json({ error: "请填写学习主题" });
+
+    const partnerStyles = {};
+    const rawStyles = body.partnerStyles && typeof body.partnerStyles === "object" ? body.partnerStyles : {};
+    for (const id of partnerIds) {
+      const s = String(rawStyles[id] || "");
+      if (["challenger", "analogist", "pragmatist", "synthesizer", "devil"].includes(s)) {
+        partnerStyles[id] = s;
+      }
+    }
+
+    const granularity = ["coarse", "medium", "fine"].includes(body.granularity)
+      ? body.granularity
+      : "medium";
+    const learnerLevel = ["beginner", "intermediate", "advanced"].includes(body.learnerLevel)
+      ? body.learnerLevel
+      : "beginner";
+
+    participantIds = [teacherId, ...partnerIds];
+    learning = {
+      topic,
+      materials: String(body.materials || ""),
+      materialLinks: String(body.materialLinks || ""),
+      goal: String(body.goal || ""),
+      granularity,
+      learnerLevel,
+      teacherId,
+      partnerIds,
+      partnerStyles,
+      plan: null,
+      currentStepIndex: 0,
+    };
+    if (!title) title = "学习：" + topic;
+  } else {
+    participantIds = Array.isArray(req.body?.participantIds)
+      ? req.body.participantIds.map(String)
+      : [];
+    if (participantIds.length === 0) return res.status(400).json({ error: "至少选择一个角色" });
+    if (!title) {
+      const names = participantIds
+        .map((id) => characters.find((c) => c.id === id)?.name)
+        .filter(Boolean);
+      title = "和 " + names.join("、") + " 聊天";
+    }
+  }
+
   const chat = {
     id: newId("t"),
-    title: String(req.body?.title || "").trim() || `和 ${names.join("、")} 聊天`,
+    title,
+    mode,
     participantIds,
     model: String(req.body?.model || "claude-sonnet-4-6"),
     messages: [],
+    learning,
     createdAt: now,
     updatedAt: now,
   };
@@ -539,7 +629,65 @@ app.delete("/api/chats/:id", async (req, res) => {
   res.status(204).end();
 });
 
-// Send a user message; Claude replies in character (1-3 replies).
+/** Generate or regenerate the learning plan for a learn-mode chat. */
+app.post("/api/chats/:id/learning-plan", async (req, res) => {
+  const chats = await listChats();
+  const idx = chats.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  const chat = chats[idx];
+  if (chat.mode !== "learn" || !chat.learning) {
+    return res.status(400).json({ error: "仅学习模式可生成计划" });
+  }
+
+  try {
+    const allCharacters = await listCharacters();
+    const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
+    const plan = await generateLearningPlan(chat, participants);
+    chat.learning = {
+      ...chat.learning,
+      plan,
+      currentStepIndex: 0,
+      partnerStyles: {
+        ...(chat.learning.partnerStyles || {}),
+        ...Object.fromEntries(plan.partnerAssignments.map((a) => [a.characterId, a.thinkingStyle])),
+      },
+    };
+    if (!chat.title || chat.title.startsWith("学习：")) {
+      chat.title = "学习：" + (plan.title || chat.learning.topic);
+    }
+    chat.updatedAt = new Date().toISOString();
+    await saveChats(chats);
+    res.json({ chat, plan });
+  } catch (err) {
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+/** Advance (or jump to) a learning plan step. */
+app.post("/api/chats/:id/learning-step", async (req, res) => {
+  const chats = await listChats();
+  const idx = chats.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  const chat = chats[idx];
+  if (chat.mode !== "learn" || !chat.learning?.plan?.steps?.length) {
+    return res.status(400).json({ error: "没有可推进的学习计划" });
+  }
+  const steps = chat.learning.plan.steps;
+  let next;
+  if (Number.isFinite(Number(req.body?.stepIndex))) {
+    next = Math.max(0, Math.min(steps.length - 1, Number(req.body.stepIndex)));
+  } else {
+    next = Math.min(steps.length - 1, (chat.learning.currentStepIndex || 0) + 1);
+  }
+  chat.learning.currentStepIndex = next;
+  chat.learning.advanceReady = false;
+  chat.learning.lastStepStatus = null;
+  chat.updatedAt = new Date().toISOString();
+  await saveChats(chats);
+  res.json(chat);
+});
+
+// Send a user message; Claude replies in character.
 app.post("/api/chats/:id/message", async (req, res) => {
   const isEndless = Boolean(req.body?.isEndless);
   const text = String(req.body?.text || "").trim();
@@ -560,8 +708,9 @@ app.post("/api/chats/:id/message", async (req, res) => {
   }
 
   try {
-    const replies = await generateChatReplies(chat, participants, chat.messages, isEndless);
-    const replyMessages = replies.map((r) => ({
+    const result = await generateChatReplies(chat, participants, chat.messages, isEndless);
+    const replies = result.replies || result;
+    const replyMessages = (Array.isArray(replies) ? replies : []).map((r) => ({
       id: newId("m"),
       role: "character",
       characterId: r.characterId,
@@ -570,11 +719,19 @@ app.post("/api/chats/:id/message", async (req, res) => {
       ts: new Date().toISOString(),
     }));
     chat.messages.push(...replyMessages);
+
+    if (chat.mode === "learn" && chat.learning) {
+      chat.learning = {
+        ...chat.learning,
+        lastStepStatus: result.stepStatus || null,
+        advanceReady: Boolean(result.advanceReady),
+      };
+    }
+
     chat.updatedAt = new Date().toISOString();
     await saveChats(chats);
     res.json({ chat, replies: replyMessages });
   } catch (err) {
-    // Keep the user message persisted even if generation failed.
     chat.updatedAt = new Date().toISOString();
     await saveChats(chats);
     res.status(502).json({ error: String(err.message || err) });
@@ -660,9 +817,14 @@ function resolveSearchMode(body = {}) {
   return body.searchEnabled ? "google" : "off";
 }
 
+function resolveEpisodeMode(body = {}) {
+  return body.mode === "sitcom" ? "sitcom" : "podcast";
+}
+
 function sanitizeEpisode(body = {}) {
   return {
     title: String(body.title || "").trim(),
+    mode: resolveEpisodeMode(body),
     topic: String(body.topic || ""),
     materials: String(body.materials || ""),
     materialLinks: String(body.materialLinks || ""),
@@ -673,6 +835,11 @@ function sanitizeEpisode(body = {}) {
     searchMode: resolveSearchMode(body),
     searchBrief: String(body.searchBrief || ""),
     basedOnEpisodeIds: Array.isArray(body.basedOnEpisodeIds) ? body.basedOnEpisodeIds.map(String) : [],
+    storyBackground: String(body.storyBackground || ""),
+    characterRelations: String(body.characterRelations || ""),
+    narratorId: String(body.narratorId || ""),
+    leadActorIds: Array.isArray(body.leadActorIds) ? body.leadActorIds.map(String) : [],
+    plotDevelopment: String(body.plotDevelopment || ""),
   };
 }
 
