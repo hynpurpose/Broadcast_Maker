@@ -33,39 +33,47 @@ speaker 必须严格使用角色 id。replies 按说话顺序排列，1~3 条。
 ## 关于引号（极其重要，违反会导致整个结果作废）
 text 内部如需引用或强调，**一律用中文全角引号“”或「」，绝对禁止英文半角双引号 "**（会破坏 JSON）。不要未转义反斜杠，每条 text 单行无换行。`;
 
-const LEARN_SYSTEM = `你是一个多角色「学习陪伴」引擎。用户在学习一个主题，你要扮演老师和各位学习伙伴（partner），用**口语短对话**循序渐进地引导用户掌握内容。
+const LEARN_SYSTEM = `你是一个多角色「学习陪伴」引擎。用户在学习一个主题，你要扮演老师和各位学习伙伴（partner），输出**有序消息序列**，客户端会按顺序揭开（讲完一段才出现下一段引用/题目）。
 
 ## 角色分工
-- **老师（teacher）**：主讲与节奏控制。讲解要清晰、可检验；根据用户回答判断是否掌握，再决定停留、换角度，或推进到下一步。不要一次塞太多。
-- **Partner**：按各自「思维风格」插话——质疑、类比、催实践、做总结、或唱反调。Partner 不是第二老师，是帮用户想明白的人；每次 0~2 个 partner 开口即可。
+- **老师（teacher）**：主讲与节奏控制。讲解清晰、可检验；不要一次塞太多。
+- **Partner**：按思维风格少量插话（质疑/类比/实践/总结/抬杠）。不是第二老师；每轮 0~2 次开口。
 
-## 教学原则
-- 严格围绕「当前学习步骤」推进，不要跳步，也不要提前剧透后面整章。
-- 先激活已知 → 讲清一点 → 举一例 → 让用户动手/回答 → 根据回答反馈。
-- 用户答错或含糊：先肯定努力，再拆错因，换例子；不要嘲讽打击。
-- 用户明显已掌握本步（能用自己的话复述/做对练习）：老师明确表扬，并自然引向下一步（或说可以点「进入下一步」）。
-- 参考材料优先；材料不足时可用常识补，但要标明是推断/常识。
-- 每条回复短（1~3 句），像语音聊天，不要长篇讲义。
+## 消息种类（kind）
+按时间顺序输出 messages 数组，每条必须有 kind：
+1. **speech**：口语讲解/点评。需要 speaker（角色 id）、text（1~3 句）、emotion。
+2. **citation**：引用网页或材料摘录。在讲到相关处再插入（夹在 speech 之间）。字段：speaker（通常老师）、text（一句引出语，可短）、citation:{ title, url?, excerpt, note? }。excerpt 控制在 80~200 字。只能引用下方「参考资料/来源」里真实有的内容，禁止瞎编 URL。
+3. **quiz**：测验。夹在讲解中或末尾。字段：speaker（老师）、text（可空或一句引导）、quiz:{ quizType: choice|truefalse|fill, prompt, options?, answer?, explanation? }。
+   - choice：options 2~4 项，answer 为正确选项原文
+   - truefalse：options 可为 [对,错]，answer 为 对 或 错
+   - fill：无 options，answer 为参考填空
+   每轮最多 1 道 quiz。出题后本轮序列应结束（后面不要再塞 speech）。
 
-## Fish Audio 语音标签
-可适度嵌入：[pause]、[laughing]、[chuckles]、[sighs]、[gasps]、[whispering]、[excited]、[hesitates]、[emphasis]。点到为止。
+## 教学节奏
+- 进入新步骤的开场：老师先讲 2~4 段 speech；需要时穿插 citation；本步可在中后段给 0~1 道 quiz。
+- 用户自由发言/快捷操作后：老师回应，可穿插 citation/quiz。
+- 用户刚答完题：先点评（对错与原因），再视情况续讲或给下一小点；不要立刻又出很难的题。
+- 严格围绕当前步骤，不要跳步。
 
-## 情绪字段
-每条回复给 emotion（2~6 字），贴合教学场景：鼓励、耐心、认真、欣慰、好奇……
+## Fish 标签（仅 speech）
+可嵌入：[pause]、[laughing]、[chuckles]、[sighs]、[gasps]、[whispering]、[excited]、[hesitates]、[emphasis]。
 
 ## 输出格式（严格遵守）
 只输出一个 JSON 对象，从 { 开始到 } 结束，不要解释、不要代码块：
 {
-  "replies": [ { "speaker": "角色的id", "text": "回复（含标签）", "emotion": "此刻情绪" } ],
+  "messages": [
+    { "kind": "speech", "speaker": "角色id", "text": "…", "emotion": "耐心" },
+    { "kind": "citation", "speaker": "角色id", "text": "来看这段材料", "citation": { "title": "…", "url": "https://…", "excerpt": "…", "note": "可选" } },
+    { "kind": "quiz", "speaker": "角色id", "text": "测一下", "quiz": { "quizType": "choice", "prompt": "…", "options": ["A","B"], "answer": "A", "explanation": "…" } }
+  ],
   "stepStatus": "teaching" | "checking" | "mastered" | "stuck",
   "advanceReady": true/false
 }
-speaker 必须是角色 id。replies 1~4 条，老师通常要出场。
-- stepStatus：本轮教学状态。
-- advanceReady：若用户已掌握当前步、可以进入下一步，则为 true（否则 false）。不要仅因用户客气说「懂了」就 true，要有实质证据。
+speaker 必须是角色 id。messages 3~8 条为宜。有 quiz 时它应是数组最后一条。
+advanceReady：仅当有实质掌握证据时为 true。
 
 ## 关于引号（极其重要）
-text 内一律用中文全角引号“”或「」，禁止英文半角双引号 "。每条 text 单行无换行。`;
+所有字符串内一律用中文全角引号“”或「」，禁止英文半角双引号 "。每条 text/excerpt 单行无换行。`;
 
 const PLAN_SYSTEM = `你是学习规划师。根据用户的主题、目标、水平与颗粒度，为一场「老师+伙伴陪伴学习」定制分步计划。
 只输出一个 JSON 对象，从 { 开始到 } 结束，不要解释、不要代码块。结构：
@@ -138,10 +146,24 @@ function buildTranscript(messages, nameOf) {
   let transcript = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    const line =
-      (m.role === "user"
-        ? `用户：${m.text}`
-        : `${nameOf(m.characterId)}（情绪：${m.emotion || "默认"}）：${m.text}`) + "\n";
+    let line;
+    if (m.role === "user") {
+      line = `用户：${m.text}\n`;
+    } else if (m.role === "system" || m.kind === "system") {
+      line = `系统：${m.text}\n`;
+    } else if (m.kind === "citation") {
+      const c = m.citation || {};
+      line = `${nameOf(m.characterId)}【引用 ${c.title || ""}】：${c.excerpt || m.text}\n`;
+    } else if (m.kind === "quiz") {
+      const q = m.quiz || {};
+      const status = m.quizStatus || "pending";
+      line =
+        `${nameOf(m.characterId)}【测验 ${q.quizType || ""}】：${q.prompt || m.text}` +
+        (status !== "pending" ? `（用户${status === "skipped" ? "跳过" : "作答：" + (m.quizResponse || "")}）` : "（待作答）") +
+        "\n";
+    } else {
+      line = `${nameOf(m.characterId)}（情绪：${m.emotion || "默认"}）：${m.text}\n`;
+    }
     if (transcript.length + line.length > MAX_TRANSCRIPT_CHARS) break;
     transcript = line + transcript;
   }
@@ -269,9 +291,24 @@ export async function generateLearningPlan(chat, characters) {
 
 export async function generateChatReplies(chat, characters, messages, isEndless = false) {
   if (chat.mode === "learn" && chat.learning) {
-    return generateLearnReplies(chat, characters, messages, isEndless);
+    return generateLearnSequence(chat, characters, messages, { mode: isEndless ? "endless" : "reply" });
   }
   return generateCasualReplies(chat, characters, messages, isEndless);
+}
+
+/** Open a learning step: teacher speaks first with optional citations/quiz. */
+export async function generateLearnTurn(chat, characters, messages, reason = "start_step") {
+  return generateLearnSequence(chat, characters, messages, { mode: "turn", reason });
+}
+
+/** After user answers or skips a quiz. */
+export async function generateLearnQuizFollowup(chat, characters, messages, quizMeta) {
+  return generateLearnSequence(chat, characters, messages, { mode: "quiz_followup", quizMeta });
+}
+
+/** User quick action (ask_teacher / discuss / …). */
+export async function generateLearnAction(chat, characters, messages, action, extraText = "") {
+  return generateLearnSequence(chat, characters, messages, { mode: "action", action, extraText });
 }
 
 async function generateCasualReplies(chat, characters, messages, isEndless = false) {
@@ -306,6 +343,7 @@ async function generateCasualReplies(chat, characters, messages, isEndless = fal
       .filter((r) => r && byId.has(r.speaker) && r.text)
       .slice(0, maxReplies)
       .map((r) => ({
+        kind: "speech",
         characterId: r.speaker,
         text: String(r.text),
         emotion: r.emotion ? String(r.emotion) : "",
@@ -315,12 +353,23 @@ async function generateCasualReplies(chat, characters, messages, isEndless = fal
   };
 }
 
-async function generateLearnReplies(chat, characters, messages, isEndless = false) {
+function sourcesBlock(learning) {
+  const sources = Array.isArray(learning.searchSources) ? learning.searchSources : [];
+  if (!sources.length) return "";
+  return (
+    `## 可引用的联网来源（citation.url 只能从这里选）\n` +
+    sources
+      .slice(0, 12)
+      .map((s, i) => `${i + 1}. ${s.title || "来源"} — ${s.url || ""}`)
+      .join("\n") +
+    "\n\n"
+  );
+}
+
+function learnContextBlocks(chat, characters) {
   const learning = chat.learning;
-  const model = chat.model || process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
   const byId = new Map(characters.map((c) => [c.id, c]));
   const nameOf = (id) => byId.get(id)?.name || "某角色";
-
   const teacher = byId.get(learning.teacherId);
   const partners = (learning.partnerIds || []).map((id) => byId.get(id)).filter(Boolean);
   const plan = learning.plan;
@@ -352,7 +401,7 @@ async function generateLearnReplies(chat, characters, messages, isEndless = fals
             `${i === stepIndex ? "👉" : "  "} ${i + 1}. ${s.title} — ${s.objective}`
         )
         .join("\n")
-    : `## 学习计划\n（尚未生成，请先围绕主题做轻量引导，并提醒用户生成计划）`;
+    : `## 学习计划\n（尚未生成）`;
 
   const stepBlock = step
     ? `## 当前步骤（第 ${stepIndex + 1}/${plan.steps.length} 步）\n` +
@@ -361,47 +410,147 @@ async function generateLearnReplies(chat, characters, messages, isEndless = fals
       `掌握检验：${step.checkHint || "（无）"}\n`
     : "";
 
-  const transcript = buildTranscript(messages, nameOf);
-  const transcriptHeader = isEndless
-    ? `## 最近对话（无尽模式：用户未发言，请老师/伙伴继续围绕当前步骤讲解或给小练习）`
-    : `## 最近对话（最后一条是用户刚说的话）`;
+  return { learning, byId, nameOf, teacher, teacherBlock, partnerBlock, planBlock, stepBlock, stepIndex };
+}
 
-  const endlessHint = isEndless
-    ? `\n当前为无尽模式：用户没说话。请继续当前步骤的讲解/追问/举例，输出 3~6 条短回复，推进理解，不要跳步。`
-    : "";
+function normalizeLearnMessages(rawList, byId, teacherId, max = 8) {
+  const out = [];
+  const list = Array.isArray(rawList) ? rawList : [];
+  for (const r of list) {
+    if (!r || typeof r !== "object") continue;
+    const kind = r.kind === "citation" || r.kind === "quiz" || r.kind === "speech" ? r.kind : "speech";
+    const speaker = String(r.speaker || teacherId || "");
+    if (!byId.has(speaker) && kind !== "system") continue;
+
+    if (kind === "citation") {
+      const c = r.citation || {};
+      const excerpt = String(c.excerpt || r.text || "").trim();
+      if (!excerpt) continue;
+      out.push({
+        kind: "citation",
+        characterId: speaker,
+        text: String(r.text || "来看这段材料").trim() || "来看这段材料",
+        emotion: r.emotion ? String(r.emotion) : "认真",
+        citation: {
+          title: String(c.title || "参考材料").trim() || "参考材料",
+          url: c.url ? String(c.url).trim() : "",
+          excerpt,
+          note: c.note ? String(c.note) : "",
+        },
+      });
+    } else if (kind === "quiz") {
+      const q = r.quiz || {};
+      const quizType = ["choice", "truefalse", "fill"].includes(q.quizType) ? q.quizType : "choice";
+      const prompt = String(q.prompt || r.text || "").trim();
+      if (!prompt) continue;
+      let options = Array.isArray(q.options) ? q.options.map(String) : [];
+      if (quizType === "truefalse" && options.length === 0) options = ["对", "错"];
+      out.push({
+        kind: "quiz",
+        characterId: speaker,
+        text: String(r.text || "").trim(),
+        emotion: r.emotion ? String(r.emotion) : "好奇",
+        quiz: {
+          quizType,
+          prompt,
+          options,
+          answer: q.answer != null ? String(q.answer) : "",
+          explanation: q.explanation ? String(q.explanation) : "",
+        },
+        quizStatus: "pending",
+      });
+      break; // quiz ends the sequence
+    } else {
+      const text = String(r.text || "").trim();
+      if (!text) continue;
+      out.push({
+        kind: "speech",
+        characterId: speaker,
+        text,
+        emotion: r.emotion ? String(r.emotion) : "",
+      });
+    }
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+async function generateLearnSequence(chat, characters, messages, opts = {}) {
+  const learning = chat.learning;
+  if (!learning) throw new Error("该对话不是学习模式");
+  const model = chat.model || process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
+  const ctx = learnContextBlocks(chat, characters);
+  const transcript = buildTranscript(messages, ctx.nameOf);
+
+  const ACTION_HINTS = {
+    ask_teacher: "用户想单独问老师一个问题（见最近用户消息），请老师主答，partner 少插话。",
+    discuss: "用户想就当前主题发起讨论，请老师抛出讨论点，partners 可各抒己见，最后可给一道轻量测验或开放问题。",
+    want_example: "用户觉得缺例子，请老师再举 1~2 个贴切例子，可配 citation。",
+    too_hard: "用户觉得太难，请老师降难度、拆小步、换更浅的类比。",
+    too_easy: "用户觉得太简单，请老师加深一点、给进阶视角或更刁钻的小测。",
+    recap: "用户要小结，请老师（可加总结者 partner）用短 speech 归纳当前步骤，必要时配对照 citation。",
+  };
+
+  let instruction = "";
+  if (opts.mode === "turn") {
+    instruction =
+      `【本轮任务：步骤开场】原因：${opts.reason || "start_step"}。\n` +
+      `请老师先讲 2~4 段 speech 打开当前步骤；需要时在讲到处插入 citation；可在中后段给 0~1 道 quiz（若出题则 quiz 必须是最后一条）。Partner 最多插 1 句。不要等用户先说话。`;
+  } else if (opts.mode === "quiz_followup") {
+    const meta = opts.quizMeta || {};
+    instruction =
+      `【本轮任务：测验点评】用户刚刚${meta.skipped ? "跳过了" : "回答了"}测验。\n` +
+      `题目：${meta.prompt || ""}\n参考答案：${meta.answer || "（无）"}\n用户作答：${meta.skipped ? "（跳过）" : meta.response || ""}\n` +
+      `请老师先点评（对/错或跳过的处理），再按需续讲一小段；本轮不要再出 quiz，除非用户明显要求。`;
+  } else if (opts.mode === "action") {
+    instruction =
+      `【本轮任务：快捷操作】${ACTION_HINTS[opts.action] || opts.action}\n` +
+      (opts.extraText ? `用户补充：${opts.extraText}\n` : "");
+  } else if (opts.mode === "endless") {
+    instruction =
+      `【本轮任务：继续讲解】用户未发言。请老师继续当前步骤讲一小段（2~4 条），可穿插 citation；不要出 quiz，不要跳步。`;
+  } else {
+    instruction = `【本轮任务：回应用户】请以老师为主、partner 适量配合，围绕当前步骤回应。可穿插 citation；需要检验时可在末尾出 1 道 quiz。`;
+  }
 
   const user =
     `## 学习主题\n${learning.topic || "（未填写）"}\n\n` +
     `## 学习目标\n${learning.goal || "（未填写）"}\n\n` +
     `## 学习者水平\n${LEVEL_HINT[learning.learnerLevel] || learning.learnerLevel}\n\n` +
     `## 参考资料\n${learning.materials || "（无）"}\n\n` +
-    `## 老师\n${teacherBlock}\n\n` +
-    `## Partners\n${partnerBlock}\n\n` +
-    `${planBlock}\n\n` +
-    stepBlock +
-    `${transcriptHeader}\n${transcript}\n` +
-    `请以老师为主、partner 适量配合，围绕【当前步骤】回复。直接输出 JSON。${endlessHint}`;
+    sourcesBlock(learning) +
+    `## 老师\n${ctx.teacherBlock}\n\n` +
+    `## Partners\n${ctx.partnerBlock}\n\n` +
+    `${ctx.planBlock}\n\n` +
+    ctx.stepBlock +
+    `## 最近对话\n${transcript || "（尚无对话）"}\n\n` +
+    instruction +
+    `\n直接输出 JSON。`;
 
   const { json, text } = await callClaudeJson({
     model,
     system: LEARN_SYSTEM,
     user,
-    maxTokens: isEndless ? 3000 : 2500,
+    maxTokens: opts.mode === "endless" ? 3500 : 4000,
   });
-  if (!json || !Array.isArray(json.replies)) {
-    throw new Error(`学习回复解析失败：${String(text).slice(0, 150)}`);
+
+  // Prefer messages[]; fall back to legacy replies[]
+  let raw = json?.messages;
+  if (!Array.isArray(raw) && Array.isArray(json?.replies)) {
+    raw = json.replies.map((r) => ({ ...r, kind: "speech" }));
   }
-  const maxReplies = isEndless ? 6 : 4;
+  if (!Array.isArray(raw)) {
+    throw new Error(`学习序列解析失败：${String(text).slice(0, 150)}`);
+  }
+
+  const replies = normalizeLearnMessages(raw, ctx.byId, learning.teacherId, opts.mode === "endless" ? 6 : 8);
+  if (replies.length === 0) {
+    throw new Error("学习序列为空");
+  }
+
   return {
-    replies: json.replies
-      .filter((r) => r && byId.has(r.speaker) && r.text)
-      .slice(0, maxReplies)
-      .map((r) => ({
-        characterId: r.speaker,
-        text: String(r.text),
-        emotion: r.emotion ? String(r.emotion) : "",
-      })),
-    advanceReady: Boolean(json.advanceReady),
-    stepStatus: json.stepStatus ? String(json.stepStatus) : null,
+    replies,
+    advanceReady: Boolean(json?.advanceReady),
+    stepStatus: json?.stepStatus ? String(json.stepStatus) : null,
   };
 }

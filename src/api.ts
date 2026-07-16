@@ -1,4 +1,4 @@
-import type { Character, CharacterDraft, Chat, ChatDraft, ChatMessage, Episode, EpisodeDraft, GenProgress, LearningPlan } from "./types";
+import type { Character, CharacterDraft, Chat, ChatDraft, ChatMessage, Episode, EpisodeDraft, GenProgress, LearnPlanProgress, LearningPlan } from "./types";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
@@ -169,12 +169,44 @@ export const api = {
       if (!r.ok) throw new Error(r.statusText);
     }),
 
-  generateLearningPlan: (id: string) =>
+  /** Start async learning-plan job (202). Poll getLearningPlanProgress until done/error. */
+  startLearningPlan: (id: string, opts?: { forceSearch?: boolean }) =>
     fetch(`/api/chats/${id}/learning-plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    }).then((r) => json<{ chat: Chat; plan: LearningPlan }>(r)),
+      body: JSON.stringify(opts || {}),
+    }).then(async (r) => {
+      if (r.status === 202 || r.ok) return json<{ started: boolean; progress?: LearnPlanProgress }>(r);
+      if (r.status === 409) {
+        const body = await r.json().catch(() => ({}));
+        return { started: false, progress: body.progress as LearnPlanProgress | undefined, busy: true };
+      }
+      throw new Error((await r.text()) || r.statusText);
+    }),
+
+  getLearningPlanProgress: (id: string) =>
+    fetch(`/api/chats/${id}/learning-plan-progress`).then((r) => json<LearnPlanProgress | null>(r)),
+
+  /** Convenience: start + poll until done; onProgress for UI. */
+  async generateLearningPlan(
+    id: string,
+    opts?: { forceSearch?: boolean; onProgress?: (p: LearnPlanProgress) => void }
+  ): Promise<{ chat: Chat; plan: LearningPlan }> {
+    const start = await api.startLearningPlan(id, opts);
+    if (start.progress) opts?.onProgress?.(start.progress);
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 800));
+      const p = await api.getLearningPlanProgress(id);
+      if (!p) continue;
+      opts?.onProgress?.(p);
+      if (p.phase === "done" && p.chat && p.plan) {
+        return { chat: p.chat, plan: p.plan };
+      }
+      if (p.phase === "error") {
+        throw new Error(p.error || "学习计划生成失败");
+      }
+    }
+  },
 
   advanceLearningStep: (id: string, stepIndex?: number) =>
     fetch(`/api/chats/${id}/learning-step`, {
@@ -182,6 +214,28 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(stepIndex === undefined ? {} : { stepIndex }),
     }).then((r) => json<Chat>(r)),
+
+  /** Start or continue a learning turn (teacher opens the step). */
+  learnTurn: (id: string, opts?: { reason?: string }) =>
+    fetch(`/api/chats/${id}/learn-turn`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts || {}),
+    }).then((r) => json<{ chat: Chat; replies: ChatMessage[] }>(r)),
+
+  quizAnswer: (id: string, body: { messageId: string; response?: string; skip?: boolean }) =>
+    fetch(`/api/chats/${id}/quiz-answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => json<{ chat: Chat; replies: ChatMessage[] }>(r)),
+
+  learnAction: (id: string, action: string, text?: string) =>
+    fetch(`/api/chats/${id}/learn-action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, text }),
+    }).then((r) => json<{ chat: Chat; replies: ChatMessage[] }>(r)),
 
   sendChatMessage: (id: string, text: string, isEndless?: boolean) =>
     fetch(`/api/chats/${id}/message`, {

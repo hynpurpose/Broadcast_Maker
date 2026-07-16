@@ -108,13 +108,50 @@ export interface Episode {
   updatedAt: string;
 }
 
+export type ChatMessageKind = "speech" | "citation" | "quiz" | "system";
+
+export type QuizType = "choice" | "truefalse" | "fill";
+
+export type QuizStatus = "pending" | "answered" | "skipped";
+
+export type LearnAction =
+  | "ask_teacher"
+  | "discuss"
+  | "want_example"
+  | "too_hard"
+  | "too_easy"
+  | "recap";
+
+export interface CitationPayload {
+  title: string;
+  url?: string;
+  excerpt: string;
+  note?: string;
+}
+
+export interface QuizPayload {
+  quizType: QuizType;
+  prompt: string;
+  /** choice: 选项文案；truefalse 可省略 */
+  options?: string[];
+  /** 参考答案（填空/选择的正确项文案或 true/false）；批改用，可对用户隐藏到作答后 */
+  answer?: string;
+  explanation?: string;
+}
+
 export interface ChatMessage {
   id: string;
-  role: "user" | "character";
+  role: "user" | "character" | "system";
   characterId?: string;
+  /** 默认 speech；旧消息无 kind 时按 speech */
+  kind?: ChatMessageKind;
   text: string;
   ts: string;
   emotion?: string;
+  citation?: CitationPayload;
+  quiz?: QuizPayload;
+  quizStatus?: QuizStatus;
+  quizResponse?: string;
 }
 
 /** 对话模式：闲聊 / 学习 */
@@ -172,6 +209,13 @@ export interface LearningConfig {
   partnerIds: string[];
   /** partnerId → 思维风格；未填则生成计划时自动分配 */
   partnerStyles: Record<string, PartnerThinkingStyle>;
+  /** 与节目页相同的联网搜索档位 */
+  searchMode: SearchMode;
+  /** 可选：想查清什么、关注角度等 */
+  searchBrief: string;
+  searchSources?: SearchSource[];
+  /** 是否已完成联网搜索（避免重复搜） */
+  searchDone?: boolean;
   plan: LearningPlan | null;
   /** 当前进行到计划第几步（0-based） */
   currentStepIndex: number;
@@ -193,13 +237,27 @@ export interface Chat {
   updatedAt: string;
 }
 
+/** 学习计划生成进度（联网搜索 / 写计划） */
+export interface LearnPlanProgress {
+  phase: "fetch_urls" | "search" | "plan" | "done" | "error";
+  error?: string;
+  searchMode?: SearchMode;
+  updatedAt?: string;
+  /** done 时附带最新 chat */
+  chat?: Chat;
+  plan?: LearningPlan;
+}
+
 export type ChatDraft = {
   title?: string;
   mode: ChatMode;
   model: string;
   /** casual：任意多选；learn：由 teacher + partners 推导 */
   participantIds?: string[];
-  learning?: Omit<LearningConfig, "plan" | "currentStepIndex">;
+  learning?: Omit<
+    LearningConfig,
+    "plan" | "currentStepIndex" | "advanceReady" | "lastStepStatus" | "searchSources" | "searchDone"
+  >;
 };
 
 export type EpisodeDraft = Pick<

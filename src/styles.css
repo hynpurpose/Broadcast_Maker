@@ -2698,6 +2698,147 @@ button.mini:hover {
   border-top: 1px solid var(--border);
 }
 
+/* Learning mode: citation / quiz / actions */
+.bubble.system,
+.bubble-row.system .bubble {
+  max-width: 100%;
+  align-self: center;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 4px 8px;
+}
+
+.bubble.citation {
+  border-color: rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.06);
+}
+
+.citation-chip {
+  background: rgba(96, 165, 250, 0.2);
+  color: #93c5fd;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.citation-card {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.citation-title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.citation-title a {
+  color: #93c5fd;
+}
+
+.citation-excerpt {
+  margin: 0;
+  padding: 0;
+  border: none;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text);
+  opacity: 0.9;
+}
+
+.bubble.quiz {
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.06);
+  max-width: 92%;
+}
+
+.quiz-chip {
+  background: rgba(52, 211, 153, 0.2);
+  color: #6ee7b7;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.quiz-prompt {
+  font-weight: 600;
+  margin: 6px 0 10px;
+  font-size: 14px;
+}
+
+.quiz-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.quiz-option {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.1);
+  color: inherit;
+  cursor: pointer;
+}
+
+.quiz-option:hover:not(:disabled) {
+  background: rgba(52, 211, 153, 0.22);
+}
+
+.quiz-fill {
+  flex: 1;
+  min-width: 140px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: inherit;
+}
+
+.quiz-skip {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.quiz-result {
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.learn-action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding-top: 4px;
+}
+
+.learn-action {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.learn-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.learn-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* Episode List — skeuomorphic library deck
    数字 Montserrat / 英文 Jost / 中文黑体(Noto Sans SC) */
 @font-face {

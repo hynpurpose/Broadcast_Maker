@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import express from "express";
 import cors from "cors";
 import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, saveChats, newId, AUDIO_DIR, DATA_DIR } from "./store.js";
-import { generateChatReplies, generateLearningPlan } from "./chat.js";
+import { generateChatReplies, generateLearningPlan, generateLearnTurn, generateLearnQuizFollowup, generateLearnAction } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
 import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls, generateRandomCharacter, polishCharacter, polishEpisodeTopic } from "./gemini.js";
@@ -16,6 +16,9 @@ import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from "./checkpoint.js
 const genProgress = new Map();
 /** Monotonic job epoch per episode — stale async jobs must not write after a force restart. */
 const genJobEpoch = new Map();
+/** Learning-plan job progress, keyed by chat id. */
+const learnPlanProgress = new Map();
+const learnPlanJobEpoch = new Map();
 /** If a job stops heartbeating for this long, treat as dead and allow a new start. */
 const STALE_MS = 45 * 60 * 1000;
 
@@ -26,6 +29,12 @@ function isActivePhase(phase) {
 function touchProgress(id, patch) {
   const next = { ...patch, updatedAt: new Date().toISOString() };
   genProgress.set(id, next);
+  return next;
+}
+
+function touchLearnPlanProgress(id, patch) {
+  const next = { ...patch, updatedAt: new Date().toISOString() };
+  learnPlanProgress.set(id, next);
   return next;
 }
 
@@ -590,6 +599,10 @@ app.post("/api/chats", async (req, res) => {
       teacherId,
       partnerIds,
       partnerStyles,
+      searchMode: resolveSearchMode(body),
+      searchBrief: String(body.searchBrief || ""),
+      searchSources: [],
+      searchDone: false,
       plan: null,
       currentStepIndex: 0,
     };
@@ -629,7 +642,7 @@ app.delete("/api/chats/:id", async (req, res) => {
   res.status(204).end();
 });
 
-/** Generate or regenerate the learning plan for a learn-mode chat. */
+/** Generate or regenerate the learning plan (async). Poll /learning-plan-progress. */
 app.post("/api/chats/:id/learning-plan", async (req, res) => {
   const chats = await listChats();
   const idx = chats.findIndex((c) => c.id === req.params.id);
@@ -639,31 +652,159 @@ app.post("/api/chats/:id/learning-plan", async (req, res) => {
     return res.status(400).json({ error: "仅学习模式可生成计划" });
   }
 
-  try {
-    const allCharacters = await listCharacters();
-    const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
-    const plan = await generateLearningPlan(chat, participants);
-    chat.learning = {
-      ...chat.learning,
-      plan,
-      currentStepIndex: 0,
-      partnerStyles: {
-        ...(chat.learning.partnerStyles || {}),
-        ...Object.fromEntries(plan.partnerAssignments.map((a) => [a.characterId, a.thinkingStyle])),
-      },
-    };
-    if (!chat.title || chat.title.startsWith("学习：")) {
-      chat.title = "学习：" + (plan.title || chat.learning.topic);
-    }
-    chat.updatedAt = new Date().toISOString();
-    await saveChats(chats);
-    res.json({ chat, plan });
-  } catch (err) {
-    res.status(500).json({ error: String(err.message || err) });
+  const forceSearch = Boolean(req.body?.forceSearch);
+  const searchMode = resolveSearchMode(chat.learning);
+  const running = learnPlanProgress.get(chat.id);
+  const busy = running && isActivePhase(running.phase);
+  if (busy && !isProgressStale(running) && !forceSearch) {
+    return res.status(409).json({
+      error: "学习计划正在生成中",
+      busy: true,
+      progress: running,
+    });
   }
+
+  const epoch = (learnPlanJobEpoch.get(chat.id) || 0) + 1;
+  learnPlanJobEpoch.set(chat.id, epoch);
+  const stillThisJob = () => learnPlanJobEpoch.get(chat.id) === epoch;
+
+  const learning0 = chat.learning;
+  const hasMaterialUrls =
+    collectMaterialUrls(learning0.materials || "", learning0.materialLinks || "").length > 0;
+  const willFetchUrls =
+    hasMaterialUrls &&
+    (forceSearch || !String(learning0.materials || "").includes("## 链接自动抓取"));
+  const willSearch = searchMode !== "off" && (forceSearch || !learning0.searchDone);
+
+  let initialPhase = "plan";
+  if (willFetchUrls) initialPhase = "fetch_urls";
+  else if (willSearch) initialPhase = "search";
+
+  const progress = touchLearnPlanProgress(chat.id, {
+    phase: initialPhase,
+    searchMode,
+  });
+  res.status(202).json({ started: true, progress });
+
+  (async () => {
+    try {
+      // Re-load chat in case of concurrent edits
+      const all = await listChats();
+      const i = all.findIndex((c) => c.id === chat.id);
+      if (i === -1) throw new Error("对话已删除");
+      let working = all[i];
+      const learning = working.learning;
+      if (!learning) throw new Error("缺少学习配置");
+
+      let materials = learning.materials || "";
+      let searchSources = Array.isArray(learning.searchSources) ? [...learning.searchSources] : [];
+      let searchDone = Boolean(learning.searchDone);
+
+      if (willFetchUrls) {
+        if (!stillThisJob()) return;
+        touchLearnPlanProgress(chat.id, { phase: "fetch_urls", searchMode });
+        const expanded = await expandMaterialsLinks({
+          materials,
+          materialLinks: learning.materialLinks || "",
+        });
+        if (!stillThisJob()) return;
+        materials = expanded.materials;
+      }
+
+      if (willSearch) {
+        if (!stillThisJob()) return;
+        touchLearnPlanProgress(chat.id, { phase: "search", searchMode });
+        const found = await gatherSearchMaterial(
+          {
+            title: working.title,
+            topic: learning.topic,
+            searchBrief: learning.searchBrief,
+            materials,
+          },
+          searchMode,
+          () => {
+            if (stillThisJob()) touchLearnPlanProgress(chat.id, { phase: "search", searchMode });
+          }
+        );
+        if (!stillThisJob()) return;
+        const seen = new Set(searchSources.map((s) => s.url));
+        for (const s of found.sources || []) {
+          if (s.url && !seen.has(s.url)) {
+            seen.add(s.url);
+            searchSources.push(s);
+          }
+        }
+        if (!String(materials).includes(`## ${found.heading}`)) {
+          materials =
+            (materials ? materials + "\n\n" : "") + `## ${found.heading}\n${found.text}`;
+        } else if (forceSearch) {
+          materials =
+            (materials ? materials + "\n\n" : "") +
+            `## ${found.heading}（更新）\n${found.text}`;
+        }
+        searchDone = true;
+      }
+
+      if (!stillThisJob()) return;
+      touchLearnPlanProgress(chat.id, { phase: "plan", searchMode });
+
+      working.learning = {
+        ...learning,
+        materials,
+        searchSources,
+        searchDone,
+        searchMode,
+        searchBrief: String(learning.searchBrief || ""),
+      };
+
+      const allCharacters = await listCharacters();
+      const participants = allCharacters.filter((c) => working.participantIds.includes(c.id));
+      const plan = await generateLearningPlan(working, participants);
+      if (!stillThisJob()) return;
+
+      working.learning = {
+        ...working.learning,
+        plan,
+        currentStepIndex: 0,
+        partnerStyles: {
+          ...(working.learning.partnerStyles || {}),
+          ...Object.fromEntries(plan.partnerAssignments.map((a) => [a.characterId, a.thinkingStyle])),
+        },
+      };
+      if (!working.title || working.title.startsWith("学习：")) {
+        working.title = "学习：" + (plan.title || working.learning.topic);
+      }
+      working.updatedAt = new Date().toISOString();
+
+      const latest = await listChats();
+      const j = latest.findIndex((c) => c.id === working.id);
+      if (j === -1) throw new Error("对话已删除");
+      latest[j] = working;
+      await saveChats(latest);
+
+      touchLearnPlanProgress(chat.id, {
+        phase: "done",
+        searchMode,
+        chat: working,
+        plan,
+      });
+    } catch (err) {
+      if (!stillThisJob()) return;
+      touchLearnPlanProgress(chat.id, {
+        phase: "error",
+        searchMode,
+        error: String(err.message || err),
+      });
+    }
+  })();
 });
 
-/** Advance (or jump to) a learning plan step. */
+app.get("/api/chats/:id/learning-plan-progress", async (req, res) => {
+  const p = learnPlanProgress.get(req.params.id) || null;
+  res.json(p);
+});
+
+/** Advance (or jump to) a learning plan step. Adds a system marker; client should call learn-turn. */
 app.post("/api/chats/:id/learning-step", async (req, res) => {
   const chats = await listChats();
   const idx = chats.findIndex((c) => c.id === req.params.id);
@@ -679,12 +820,175 @@ app.post("/api/chats/:id/learning-step", async (req, res) => {
   } else {
     next = Math.min(steps.length - 1, (chat.learning.currentStepIndex || 0) + 1);
   }
+  const prev = chat.learning.currentStepIndex || 0;
   chat.learning.currentStepIndex = next;
   chat.learning.advanceReady = false;
   chat.learning.lastStepStatus = null;
+  if (next !== prev || req.body?.announce) {
+    const step = steps[next];
+    chat.messages.push({
+      id: newId("m"),
+      role: "system",
+      kind: "system",
+      text: `进入第 ${next + 1} 步：${step?.title || ""}`,
+      ts: new Date().toISOString(),
+    });
+  }
   chat.updatedAt = new Date().toISOString();
   await saveChats(chats);
   res.json(chat);
+});
+
+function toChatMessages(rawReplies) {
+  const now = new Date().toISOString();
+  return (Array.isArray(rawReplies) ? rawReplies : []).map((r) => {
+    const kind = r.kind || "speech";
+    const base = {
+      id: newId("m"),
+      role: kind === "system" ? "system" : "character",
+      kind,
+      characterId: r.characterId,
+      text: r.text || "",
+      emotion: r.emotion || "",
+      ts: now,
+    };
+    if (kind === "citation" && r.citation) base.citation = r.citation;
+    if (kind === "quiz" && r.quiz) {
+      base.quiz = r.quiz;
+      base.quizStatus = r.quizStatus || "pending";
+    }
+    return base;
+  });
+}
+
+function applyLearnMeta(chat, result) {
+  if (chat.mode === "learn" && chat.learning) {
+    chat.learning = {
+      ...chat.learning,
+      lastStepStatus: result.stepStatus || null,
+      advanceReady: Boolean(result.advanceReady),
+    };
+  }
+}
+
+/** Teacher opens / continues the current learning step with a sequenced turn. */
+app.post("/api/chats/:id/learn-turn", async (req, res) => {
+  const chats = await listChats();
+  const idx = chats.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  const chat = chats[idx];
+  if (chat.mode !== "learn" || !chat.learning?.plan) {
+    return res.status(400).json({ error: "仅学习模式且需已有计划" });
+  }
+  const allCharacters = await listCharacters();
+  const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
+  if (participants.length === 0) return res.status(400).json({ error: "该对话没有有效角色" });
+
+  try {
+    const reason = String(req.body?.reason || "start_step");
+    const result = await generateLearnTurn(chat, participants, chat.messages, reason);
+    const replyMessages = toChatMessages(result.replies);
+    chat.messages.push(...replyMessages);
+    applyLearnMeta(chat, result);
+    chat.updatedAt = new Date().toISOString();
+    await saveChats(chats);
+    res.json({ chat, replies: replyMessages });
+  } catch (err) {
+    res.status(502).json({ error: String(err.message || err) });
+  }
+});
+
+/** Answer or skip a pending quiz, then get teacher follow-up sequence. */
+app.post("/api/chats/:id/quiz-answer", async (req, res) => {
+  const chats = await listChats();
+  const idx = chats.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  const chat = chats[idx];
+  if (chat.mode !== "learn") return res.status(400).json({ error: "仅学习模式" });
+
+  const messageId = String(req.body?.messageId || "");
+  const skip = Boolean(req.body?.skip);
+  const response = String(req.body?.response || "").trim();
+  const quizMsg = chat.messages.find((m) => m.id === messageId && (m.kind === "quiz" || m.quiz));
+  if (!quizMsg) return res.status(404).json({ error: "找不到该测验消息" });
+  if (quizMsg.quizStatus && quizMsg.quizStatus !== "pending") {
+    return res.status(400).json({ error: "该题已作答" });
+  }
+  if (!skip && !response) return res.status(400).json({ error: "请作答或跳过" });
+
+  quizMsg.quizStatus = skip ? "skipped" : "answered";
+  quizMsg.quizResponse = skip ? "" : response;
+
+  const allCharacters = await listCharacters();
+  const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
+
+  try {
+    const result = await generateLearnQuizFollowup(chat, participants, chat.messages, {
+      prompt: quizMsg.quiz?.prompt || quizMsg.text,
+      answer: quizMsg.quiz?.answer || "",
+      response,
+      skipped: skip,
+    });
+    const replyMessages = toChatMessages(result.replies);
+    chat.messages.push(...replyMessages);
+    applyLearnMeta(chat, result);
+    chat.updatedAt = new Date().toISOString();
+    await saveChats(chats);
+    res.json({ chat, replies: replyMessages });
+  } catch (err) {
+    chat.updatedAt = new Date().toISOString();
+    await saveChats(chats);
+    res.status(502).json({ error: String(err.message || err), chat });
+  }
+});
+
+const LEARN_ACTIONS = new Set(["ask_teacher", "discuss", "want_example", "too_hard", "too_easy", "recap"]);
+
+/** Quick learning actions from the learner. */
+app.post("/api/chats/:id/learn-action", async (req, res) => {
+  const chats = await listChats();
+  const idx = chats.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  const chat = chats[idx];
+  if (chat.mode !== "learn" || !chat.learning) {
+    return res.status(400).json({ error: "仅学习模式" });
+  }
+  const action = String(req.body?.action || "");
+  if (!LEARN_ACTIONS.has(action)) return res.status(400).json({ error: "未知操作" });
+  const extra = String(req.body?.text || "").trim();
+
+  const labels = {
+    ask_teacher: "【问老师】",
+    discuss: "【发起讨论】",
+    want_example: "【再举个例子】",
+    too_hard: "【太难了，降一点】",
+    too_easy: "【太简单，加深一点】",
+    recap: "【小结一下】",
+  };
+  chat.messages.push({
+    id: newId("m"),
+    role: "user",
+    kind: "speech",
+    text: labels[action] + (extra ? " " + extra : ""),
+    ts: new Date().toISOString(),
+  });
+
+  const allCharacters = await listCharacters();
+  const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
+
+  try {
+    const result = await generateLearnAction(chat, participants, chat.messages, action, extra);
+    const replyMessages = toChatMessages(result.replies);
+    chat.messages.push(...replyMessages);
+    applyLearnMeta(chat, result);
+    chat.updatedAt = new Date().toISOString();
+    await saveChats(chats);
+    res.json({ chat, replies: replyMessages });
+  } catch (err) {
+    chat.updatedAt = new Date().toISOString();
+    await saveChats(chats);
+    res.status(502).json({ error: String(err.message || err), chat });
+  }
 });
 
 // Send a user message; Claude replies in character.
@@ -698,36 +1002,28 @@ app.post("/api/chats/:id/message", async (req, res) => {
   if (idx === -1) return res.status(404).json({ error: "not found" });
   const chat = chats[idx];
 
+  // Block free chat while a quiz is pending in learn mode
+  if (chat.mode === "learn" && !isEndless) {
+    const pending = [...chat.messages].reverse().find((m) => m.kind === "quiz" && (m.quizStatus || "pending") === "pending");
+    if (pending) {
+      return res.status(400).json({ error: "请先作答或跳过当前测验，再继续聊天" });
+    }
+  }
+
   const allCharacters = await listCharacters();
   const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
   if (participants.length === 0) return res.status(400).json({ error: "该对话没有有效角色" });
 
   if (!isEndless) {
     const now = new Date().toISOString();
-    chat.messages.push({ id: newId("m"), role: "user", text, ts: now });
+    chat.messages.push({ id: newId("m"), role: "user", kind: "speech", text, ts: now });
   }
 
   try {
     const result = await generateChatReplies(chat, participants, chat.messages, isEndless);
-    const replies = result.replies || result;
-    const replyMessages = (Array.isArray(replies) ? replies : []).map((r) => ({
-      id: newId("m"),
-      role: "character",
-      characterId: r.characterId,
-      text: r.text,
-      emotion: r.emotion,
-      ts: new Date().toISOString(),
-    }));
+    const replyMessages = toChatMessages(result.replies || result);
     chat.messages.push(...replyMessages);
-
-    if (chat.mode === "learn" && chat.learning) {
-      chat.learning = {
-        ...chat.learning,
-        lastStepStatus: result.stepStatus || null,
-        advanceReady: Boolean(result.advanceReady),
-      };
-    }
-
+    applyLearnMeta(chat, result);
     chat.updatedAt = new Date().toISOString();
     await saveChats(chats);
     res.json({ chat, replies: replyMessages });
