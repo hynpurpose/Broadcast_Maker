@@ -70,6 +70,7 @@ export function PodcastPlayer({
   const urlsRef = useRef<Record<string, string | undefined>>({});
   const promisesRef = useRef<Record<string, Promise<string> | undefined>>({});
   const currentRef = useRef<number>(-1);
+  const scrubGenRef = useRef(0);
 
   const [current, setCurrent] = useState(-1);
   const [playing, setPlaying] = useState(false);
@@ -214,6 +215,7 @@ export function PodcastPlayer({
   const playIndex = useCallback(
     async (index: number) => {
       if (index < 0 || index >= n) return;
+      const gen = ++scrubGenRef.current;
       setError(null);
       setCurrent(index);
       for (let k = 1; k <= PREFETCH_AHEAD; k++) {
@@ -221,17 +223,31 @@ export function PodcastPlayer({
       }
       try {
         const url = await ensureAudio(index);
+        if (gen !== scrubGenRef.current) return;
         const audio = audioRef.current;
         if (!audio) return;
         audio.src = url;
         await audio.play();
+        if (gen !== scrubGenRef.current) return;
         setPlaying(true);
       } catch (e) {
+        if (gen !== scrubGenRef.current) return;
         setPlaying(false);
         setError(`第 ${index + 1} 段配音失败：${e instanceof Error ? e.message : e}`);
       }
     },
     [ensureAudio, n]
+  );
+
+  const scrubBy = useCallback(
+    (delta: number) => {
+      if (n <= 0) return;
+      const base = currentRef.current < 0 ? 0 : currentRef.current;
+      const next = Math.max(0, Math.min(n - 1, base + delta));
+      if (next === currentRef.current && currentRef.current >= 0) return;
+      playIndex(next);
+    },
+    [n, playIndex]
   );
 
   const onEnded = useCallback(() => {
@@ -511,6 +527,8 @@ export function PodcastPlayer({
         canPrevEpisode={canPrevEpisode}
         canNextEpisode={canNextEpisode}
         notice={notice}
+        onScrubBy={scrubBy}
+        canScrub={n > 1}
       />
 
       {error && <p className="error">⚠ {error}</p>}

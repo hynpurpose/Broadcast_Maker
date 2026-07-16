@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import iconCache from "../assets/icon-cache.png";
 import iconExport from "../assets/icon-export.png";
 
@@ -119,6 +119,8 @@ export function DeckPlayer({
   audioEl = null,
   onEject,
   notice = null,
+  onScrubBy,
+  canScrub = false,
 }: {
   title: string;
   speaker: string;
@@ -147,6 +149,9 @@ export function DeckPlayer({
   audioEl?: HTMLAudioElement | null;
   onEject?: () => void;
   notice?: string | null;
+  /** 侧面滚轮：+1 下一段 / -1 上一段 */
+  onScrubBy?: (delta: number) => void;
+  canScrub?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef(0);
@@ -155,6 +160,9 @@ export function DeckPlayer({
   const durRef = useRef(segmentDuration);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const timeDataRef = useRef<Uint8Array | null>(null);
+  const [scrubbing, setScrubbing] = useState(false);
+  const wheelAccRef = useRef(0);
+  const sliderRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     playingRef.current = playing;
@@ -165,6 +173,45 @@ export function DeckPlayer({
   useEffect(() => {
     durRef.current = segmentDuration;
   }, [segmentDuration]);
+
+  useEffect(() => {
+    if (!scrubbing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setScrubbing(false);
+    };
+    const onPointer = (e: PointerEvent) => {
+      const el = sliderRef.current;
+      if (el && e.target instanceof Node && el.contains(e.target)) return;
+      setScrubbing(false);
+    };
+    const onWheel = (e: globalThis.WheelEvent) => {
+      if (!onScrubBy) return;
+      e.preventDefault();
+      wheelAccRef.current += e.deltaY;
+      if (Math.abs(wheelAccRef.current) < 28) return;
+      const dir = wheelAccRef.current > 0 ? 1 : -1;
+      wheelAccRef.current = 0;
+      onScrubBy(dir);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onPointer);
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("wheel", onWheel);
+    };
+  }, [scrubbing, onScrubBy]);
+
+  useEffect(() => {
+    if (!scrubbing) wheelAccRef.current = 0;
+  }, [scrubbing]);
+
+  function toggleScrub(e: MouseEvent) {
+    e.stopPropagation();
+    if (!canScrub || !onScrubBy) return;
+    setScrubbing((v) => !v);
+  }
 
   useEffect(() => {
     if (!audioEl) return;
@@ -278,8 +325,16 @@ export function DeckPlayer({
           <div className="deck-status">
             <span className="deck-clock">{formatClock()}</span>
             <span className="deck-status-mid">
-              <span className={"deck-rec-dot" + (playing ? " live" : "")} />
-              {playing ? "NOW PLAYING" : busy ? (exporting ? "EXPORTING" : "CACHING") : "STAND BY"}
+              <span className={"deck-rec-dot" + (playing || scrubbing ? " live" : "")} />
+              {scrubbing
+                ? "SCRUB MODE"
+                : playing
+                  ? "NOW PLAYING"
+                  : busy
+                    ? exporting
+                      ? "EXPORTING"
+                      : "CACHING"
+                    : "STAND BY"}
             </span>
             <span className="deck-status-right">
               <span className="deck-seg-tag">{segLabel}</span>
@@ -447,7 +502,24 @@ export function DeckPlayer({
           </button>
         </div>
       </div>
-      <div className="deck-side-slider" aria-hidden="true" />
+      <button
+        type="button"
+        ref={sliderRef}
+        className={
+          "deck-side-slider" +
+          (scrubbing ? " is-scrubbing" : "") +
+          (!canScrub ? " is-disabled" : "")
+        }
+        onClick={toggleScrub}
+        disabled={!canScrub}
+        aria-pressed={scrubbing}
+        aria-label={scrubbing ? "退出快速拉进度" : "进入快速拉进度"}
+        title={
+          scrubbing
+            ? "滚轮切换句子 · 再点退出（Esc）"
+            : "点击进入快速拉进度，滚轮切换当前句子"
+        }
+      />
     </div>
   );
 }
