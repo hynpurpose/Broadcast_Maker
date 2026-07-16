@@ -127,7 +127,11 @@ export function EpisodeLibrary({
                 )}
                 <div className="ep-meta">
                   <span className="ep-meta-item">
-                    {e.model === "claude-opus-4-8" ? "Opus" : "Sonnet"}
+                    {e.model === "claude-opus-4-8"
+                      ? "Opus"
+                      : e.model?.startsWith("gemini")
+                      ? "Gemini"
+                      : "Sonnet"}
                   </span>
                   <span className="ep-meta-item">
                     {(e.mode || "podcast") === "sitcom" ? "情景剧" : "播客"}

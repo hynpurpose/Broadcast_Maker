@@ -168,8 +168,20 @@ export function ChatsPanel({ characters }: { characters: Character[] }) {
       ? Boolean(topic.trim() && teacherId && partnerIds.length >= 1 && partnerIds.length <= 3 && !creating)
       : pickedIds.length > 0 && !creating;
 
+  if (selected) {
+    return (
+      <ChatWindow
+        key={selected.id}
+        chat={selected}
+        characters={characters}
+        onBack={() => setSelectedId(null)}
+        onChatUpdated={(chat) => setChats((list) => list.map((c) => (c.id === chat.id ? chat : c)))}
+      />
+    );
+  }
+
   return (
-    <div className="layout chat-layout">
+    <div className="layout chat-layout chat-list-layout">
       <section className="col">
         <div className="card form">
           <h2>发起新对话</h2>
@@ -362,24 +374,24 @@ export function ChatsPanel({ characters }: { characters: Character[] }) {
         </div>
 
         <div className="card">
-          <h2>对话列表（{chats.length}）</h2>
-          {chats.length === 0 && <p className="muted">还没有对话。</p>}
+          <h2>项目（{chats.length}）</h2>
+          {chats.length === 0 && <p className="muted">还没有项目，发起一个学习或闲聊吧。</p>}
           <ul className="char-list">
             {chats.map((c) => (
-              <li
-                key={c.id}
-                className={"char-item" + (c.id === selectedId ? " active" : "")}
-                onClick={() => setSelectedId(c.id)}
-              >
+              <li key={c.id} className="char-item" onClick={() => setSelectedId(c.id)}>
                 <div>
                   <strong>{c.title}</strong>
                   <div className="muted small">
                     {(c.mode || "casual") === "learn" ? "学习" : "闲聊"} · {c.messages.length} 条消息
-                    {c.learning?.plan ? ` · 第 ${(c.learning.currentStepIndex || 0) + 1}/${c.learning.plan.steps.length} 步` : ""}
+                    {c.learning?.plan
+                      ? ` · 第 ${(c.learning.currentStepIndex || 0) + 1}/${c.learning.plan.steps.length} 步`
+                      : ""}
                   </div>
                 </div>
                 <div className="actions end" onClick={(ev) => ev.stopPropagation()}>
-                  <button className="danger" onClick={() => handleDelete(c.id)}>删除</button>
+                  <button className="danger" onClick={() => handleDelete(c.id)}>
+                    删除
+                  </button>
                 </div>
               </li>
             ))}
@@ -388,19 +400,10 @@ export function ChatsPanel({ characters }: { characters: Character[] }) {
       </section>
 
       <section className="col">
-        {selected ? (
-          <ChatWindow
-            key={selected.id}
-            chat={selected}
-            characters={characters}
-            onChatUpdated={(chat) => setChats((list) => list.map((c) => (c.id === chat.id ? chat : c)))}
-          />
-        ) : (
-          <div className="card">
-            <h2>聊天室</h2>
-            <p className="muted">发起或选择一个对话。学习模式下，老师与伙伴会按计划循序引导你。</p>
-          </div>
-        )}
+        <div className="card">
+          <h2>进入项目</h2>
+          <p className="muted">从左侧选择一个项目进入。学习项目会打开独立教室页，左边看进度与资料，右边听老师讲解并互动。</p>
+        </div>
       </section>
     </div>
   );
@@ -426,18 +429,49 @@ function messageKind(m: ChatMessage) {
   return m.kind || (m.role === "system" ? "system" : "speech");
 }
 
+/** Messages for the current plan step (mirrors server/learnGate.js). */
+function currentStepMessages(chat: Chat) {
+  const stepIndex = Math.max(0, Number(chat.learning?.currentStepIndex) || 0);
+  const messages = chat.messages || [];
+  let start = 0;
+  let end = messages.length;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (messageKind(m) !== "system" && m.role !== "system") continue;
+    const match = String(m.text || "").match(/进入第\s*(\d+)\s*步/);
+    if (!match) continue;
+    const n = Number(match[1]) - 1;
+    if (!Number.isFinite(n)) continue;
+    if (n === stepIndex) start = i + 1;
+    if (n > stepIndex) {
+      end = i;
+      break;
+    }
+  }
+  return messages.slice(start, end);
+}
+
+function hasCompletedNodeTask(chat: Chat) {
+  return currentStepMessages(chat).some(
+    (m) => messageKind(m) === "quiz" && m.quizStatus === "answered"
+  );
+}
+
 function ChatWindow({
   chat,
   characters,
+  onBack,
   onChatUpdated,
 }: {
   chat: Chat;
   characters: Character[];
+  onBack: () => void;
   onChatUpdated: (chat: Chat) => void;
 }) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [speechPaused, setSpeechPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [endlessMode, setEndlessMode] = useState(false);
   const [endlessPaused, setEndlessPaused] = useState(false);
@@ -464,6 +498,31 @@ function ChatWindow({
         .find((m) => messageKind(m) === "quiz" && (m.quizStatus || "pending") === "pending" && !staging.has(m.id))
     : null;
 
+  const listeningDone = staging.size === 0 && !speakingId;
+  const nodeTaskDone = isLearn ? hasCompletedNodeTask(chat) : true;
+  const advanceBlockReason = !isLearn
+    ? ""
+    : !listeningDone
+    ? speakingId || staging.size > 0
+      ? "请先听完本节讲解（勿跳过播放），再进入下一节"
+      : "请先听完本节讲解"
+    : pendingQuiz
+    ? "请先完成本节节点任务（测验）"
+    : !nodeTaskDone
+    ? "请先完成本节最后的节点任务，才能进入下一节"
+    : stepIndex >= (plan?.steps?.length || 0) - 1
+    ? "已是最后一步"
+    : "";
+  const canAdvanceNext =
+    isLearn &&
+    Boolean(plan) &&
+    listeningDone &&
+    !pendingQuiz &&
+    nodeTaskDone &&
+    !sending &&
+    !stepBusy &&
+    stepIndex < (plan?.steps?.length || 0) - 1;
+
   function unlockAudio() {
     const audio = audioRef.current;
     if (!audio || unlockedRef.current) return;
@@ -487,6 +546,7 @@ function ChatWindow({
     setEndlessMode(false);
     setEndlessPaused(false);
     setStaging(new Set());
+    setSpeechPaused(false);
     autoTurnRef.current = null;
     return () => {
       playTokenRef.current++;
@@ -494,7 +554,24 @@ function ChatWindow({
     };
   }, [chat.id]);
 
-  async function playOneSpeech(m: ChatMessage) {
+  function toggleSpeechPause() {
+    const audio = audioRef.current;
+    if (!audio || !speakingId) return;
+    if (audio.paused) {
+      audio
+        .play()
+        .then(() => {
+          setSpeechPaused(false);
+          unlockedRef.current = true;
+        })
+        .catch(() => {});
+    } else {
+      audio.pause();
+      setSpeechPaused(true);
+    }
+  }
+
+  async function playOneSpeech(m: ChatMessage, token: number) {
     const c = charOf(m.characterId);
     const text = (m.text || "").trim();
     if (!text) {
@@ -508,24 +585,40 @@ function ChatWindow({
       await sleep(400);
       return;
     }
+    if (playTokenRef.current !== token) {
+      URL.revokeObjectURL(url);
+      return;
+    }
     const audio = audioRef.current;
     if (!audio) {
       URL.revokeObjectURL(url);
       return;
     }
+    setSpeechPaused(false);
     setSpeakingId(m.id);
     audio.src = url;
     try {
       await audio.play();
       unlockedRef.current = true;
       await new Promise<void>((resolve) => {
-        const done = () => {
-          audio.removeEventListener("ended", done);
-          audio.removeEventListener("pause", done);
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          audio.removeEventListener("ended", onEnded);
+          clearInterval(watch);
           resolve();
         };
-        audio.addEventListener("ended", done);
-        audio.addEventListener("pause", done);
+        const onEnded = () => finish();
+        const watch = window.setInterval(() => {
+          if (playTokenRef.current !== token) {
+            audio.pause();
+            finish();
+          }
+        }, 120);
+        audio.addEventListener("ended", onEnded);
+        // User pause must NOT finish — only ended or abort advances the queue.
+        if (audio.ended) finish();
       });
     } catch (e) {
       if (e instanceof DOMException && e.name === "NotAllowedError") {
@@ -533,13 +626,17 @@ function ChatWindow({
       }
     } finally {
       URL.revokeObjectURL(url);
+      if (playTokenRef.current === token) {
+        setSpeechPaused(false);
+      }
     }
   }
 
-  /** Sequentially reveal replies: speech TTS, citation pause, quiz stops the queue. */
+  /** Sequentially reveal replies: show one → play TTS → then next. */
   async function revealSequence(replies: ChatMessage[]) {
     if (!replies.length) return;
     const token = ++playTokenRef.current;
+    setSpeechPaused(false);
     setStaging(new Set(replies.map((r) => r.id)));
     for (const m of replies) {
       if (playTokenRef.current !== token) return;
@@ -550,11 +647,12 @@ function ChatWindow({
       });
       const kind = messageKind(m);
       if (kind === "speech") {
-        await playOneSpeech(m);
+        await playOneSpeech(m, token);
       } else if (kind === "citation") {
         await sleep(900);
       } else if (kind === "quiz") {
         setSpeakingId(null);
+        setSpeechPaused(false);
         return; // wait for answer
       } else {
         await sleep(350);
@@ -562,17 +660,21 @@ function ChatWindow({
       if (playTokenRef.current !== token) return;
     }
     setSpeakingId(null);
+    setSpeechPaused(false);
   }
 
   async function playMessages(msgs: ChatMessage[]) {
-    // Manual ▶ on a single bubble: play speech only
     const speech = msgs.filter((m) => messageKind(m) === "speech" && m.text);
     const token = ++playTokenRef.current;
+    setSpeechPaused(false);
     for (const m of speech) {
       if (playTokenRef.current !== token) return;
-      await playOneSpeech(m);
+      await playOneSpeech(m, token);
     }
-    setSpeakingId(null);
+    if (playTokenRef.current === token) {
+      setSpeakingId(null);
+      setSpeechPaused(false);
+    }
   }
 
   async function runLearnTurn(reason = "start_step") {
@@ -714,16 +816,20 @@ function ChatWindow({
     }
   }
 
-  async function advanceStep(nextIndex?: number) {
+  async function advanceStep() {
+    if (!canAdvanceNext) {
+      setError(advanceBlockReason || "请先完成本节关卡");
+      return;
+    }
     setStepBusy(true);
     setError(null);
     unlockAudio();
     try {
-      const updated = await api.advanceLearningStep(chat.id, nextIndex);
+      const updated = await api.advanceLearningStep(chat.id, { listened: true });
       onChatUpdated(updated);
       autoTurnRef.current = null;
       const { chat: opened, replies } = await api.learnTurn(updated.id, {
-        reason: nextIndex === undefined ? "next_step" : "jump_step",
+        reason: "next_step",
       });
       onChatUpdated(opened);
       await revealSequence(replies);
@@ -737,7 +843,14 @@ function ChatWindow({
   const styleLabel = (id?: string) =>
     PARTNER_THINKING_STYLES.find((s) => s.id === id)?.label.split(" — ")[0] || id || "";
 
-  const visibleMessages = chat.messages.filter((m) => !staging.has(m.id));
+  // Right pane: only teacher/partner speech + interactive (quiz/user). Citations stay in sidebar sources.
+  const visibleMessages = chat.messages.filter((m) => {
+    if (staging.has(m.id)) return false;
+    if (!isLearn) return true;
+    const kind = messageKind(m);
+    if (kind === "citation" || kind === "system" || m.role === "system") return false;
+    return kind === "speech" || kind === "quiz";
+  });
 
   function renderMessage(m: ChatMessage) {
     const kind = messageKind(m);
@@ -827,9 +940,6 @@ function ChatWindow({
                     </button>
                   ))
                 )}
-                <button type="button" className="quiz-skip" disabled={sending} onClick={() => submitQuiz(m.id, "", true)}>
-                  跳过
-                </button>
               </div>
             ) : (
               <div className="quiz-result muted small">
@@ -839,7 +949,7 @@ function ChatWindow({
                 {status === "answered" && q?.answer && (
                   <div>参考答案：{q.answer}</div>
                 )}
-                {q?.explanation && status !== "pending" && <div>{q.explanation}</div>}
+                {q?.explanation && <div>{q.explanation}</div>}
               </div>
             )}
           </div>
@@ -868,8 +978,15 @@ function ChatWindow({
                   {m.emotion}
                 </span>
               )}
-              <button className="mini" title="播放这条" onClick={() => playMessages([m])}>
-                ▶
+              <button
+                className="mini"
+                title={speakingId === m.id ? (speechPaused ? "继续播放" : "暂停") : "播放这条"}
+                onClick={() => {
+                  if (speakingId === m.id) toggleSpeechPause();
+                  else playMessages([m]);
+                }}
+              >
+                {speakingId === m.id && !speechPaused ? "⏸" : "▶"}
               </button>
             </div>
           )}
@@ -879,172 +996,41 @@ function ChatWindow({
     );
   }
 
-  return (
-    <div className="card chat-window">
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "12px",
-          borderBottom: "1px solid var(--border)",
-          paddingBottom: "12px",
-        }}
-      >
-        <h2 style={{ margin: 0 }}>{chat.title}</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-              margin: 0,
-              cursor: "pointer",
-              userSelect: "none",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={endlessMode}
-              onChange={(e) => {
-                setEndlessMode(e.target.checked);
-                if (e.target.checked) setEndlessPaused(false);
-              }}
-              style={{ width: "auto", margin: 0 }}
-              disabled={Boolean(pendingQuiz)}
-            />
-            <span style={{ fontWeight: 600, color: endlessMode ? "var(--accent)" : "var(--muted)" }}>
-              {isLearn ? "继续讲解" : "无尽模式"}
-            </span>
-          </label>
-          {endlessMode && (
-            <button
-              onClick={() => setEndlessPaused(!endlessPaused)}
-              className={endlessPaused ? "primary" : ""}
-              style={{
-                padding: "4px 10px",
-                fontSize: "12px",
-                borderRadius: "6px",
-                borderColor: endlessPaused ? "var(--accent)" : "var(--border)",
-              }}
-            >
-              {endlessPaused ? "▶ 继续输出" : "⏸ 暂停输出"}
-            </button>
-          )}
-        </div>
-      </div>
-
-      {isLearn && learning && (
-        <div className="learn-panel">
-          <div className="learn-panel-head">
-            <div>
-              <div className="muted small">学习主题</div>
-              <strong>{learning.topic}</strong>
-              {(learning.searchMode || "off") !== "off" && (
-                <div className="muted small" style={{ marginTop: 4 }}>
-                  联网：
-                  {SEARCH_MODES.find((m) => m.id === learning.searchMode)?.label || learning.searchMode}
-                  {learning.searchDone ? " · 已搜" : " · 待搜"}
-                </div>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <button type="button" disabled={planBusy || sending} onClick={() => regeneratePlan(false)}>
-                {planBusy
-                  ? learnPlanProgressText(planProgress)
-                  : plan
-                  ? "重新生成计划"
-                  : "生成学习计划"}
-              </button>
-              {(learning.searchMode || "off") !== "off" && (
-                <button type="button" disabled={planBusy || sending} onClick={() => regeneratePlan(true)}>
-                  {planBusy && (planProgress?.phase === "search" || planProgress?.phase === "fetch_urls")
-                    ? learnPlanProgressText(planProgress)
-                    : planBusy
-                    ? "处理中…"
-                    : "重新搜索并生成"}
-                </button>
-              )}
-            </div>
-          </div>
-          {planBusy && planProgress && (
-            <p className="muted small">{learnPlanProgressText(planProgress)}</p>
-          )}
-          {learning.goal && <p className="muted small">目标：{learning.goal}</p>}
-          {learning.searchSources && learning.searchSources.length > 0 && (
-            <SourcesBlock sources={learning.searchSources} />
-          )}
-          {plan ? (
-            <>
-              <p className="small">{plan.summary}</p>
-              <ol className="learn-steps">
-                {plan.steps.map((s, i) => (
-                  <li
-                    key={s.id}
-                    className={
-                      "learn-step" + (i === stepIndex ? " current" : "") + (i < stepIndex ? " done" : "")
-                    }
-                  >
-                    <button
-                      type="button"
-                      className="learn-step-btn"
-                      disabled={stepBusy || sending}
-                      onClick={() => advanceStep(i)}
-                      title="跳到这一步"
-                    >
-                      <span className="learn-step-idx">{i + 1}</span>
-                      <span>
-                        <strong>{s.title}</strong>
-                        <span className="muted small" style={{ display: "block" }}>
-                          {s.objective}
-                        </span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-              {currentStep && (
-                <div className="learn-current">
-                  <div>
-                    当前：第 {stepIndex + 1}/{plan.steps.length} 步 · {currentStep.title}
-                    {learning.advanceReady && (
-                      <span className="chip" style={{ marginLeft: 8 }}>
-                        可进入下一步
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {!chat.messages.some((m) => m.role === "character") && (
-                      <button type="button" disabled={sending || stepBusy} onClick={() => runLearnTurn("manual_start")}>
-                        开始本步
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="primary"
-                      disabled={stepBusy || sending || stepIndex >= plan.steps.length - 1}
-                      onClick={() => advanceStep()}
-                    >
-                      {stepIndex >= plan.steps.length - 1 ? "已是最后一步" : "进入下一步"}
-                    </button>
-                  </div>
-                </div>
-              )}
-              {plan.partnerAssignments?.length > 0 && (
-                <p className="muted small">
-                  Partner：
-                  {plan.partnerAssignments
-                    .map((a) => `${charOf(a.characterId)?.name || "?"}（${styleLabel(a.thinkingStyle)}）`)
-                    .join(" · ")}
-                </p>
-              )}
-            </>
-          ) : (
-            <p className="muted small">还没有学习计划，点上方按钮生成后再开始。</p>
-          )}
-        </div>
+  const headerControls = (
+    <div className="project-header-controls">
+      <label className="project-endless-label">
+        <input
+          type="checkbox"
+          checked={endlessMode}
+          onChange={(e) => {
+            setEndlessMode(e.target.checked);
+            if (e.target.checked) setEndlessPaused(false);
+          }}
+          disabled={Boolean(pendingQuiz)}
+        />
+        <span style={{ fontWeight: 600, color: endlessMode ? "var(--accent)" : "var(--muted)" }}>
+          {isLearn ? "继续讲解" : "无尽模式"}
+        </span>
+      </label>
+      {endlessMode && (
+        <button
+          type="button"
+          onClick={() => setEndlessPaused(!endlessPaused)}
+          className={endlessPaused ? "primary" : ""}
+        >
+          {endlessPaused ? "▶ 继续输出" : "⏸ 暂停输出"}
+        </button>
       )}
+                  {speakingId && (
+        <button type="button" className="primary" onClick={toggleSpeechPause}>
+          {speechPaused ? "▶ 继续播放" : "⏸ 暂停讲解"}
+        </button>
+      )}
+    </div>
+  );
 
+  const messagesPane = (
+    <>
       <div className="chat-messages" ref={listRef}>
         {visibleMessages.length === 0 && !sending && (
           <p className="muted">
@@ -1069,6 +1055,11 @@ function ChatWindow({
                 : "对方正在输入…"}
             </div>
           </div>
+        )}
+        {staging.size > 0 && speakingId && (
+          <p className="muted small project-queue-hint">
+            {speechPaused ? "已暂停讲解，点击继续后听完再显示下一条" : "听完本条后将显示下一条…"}
+          </p>
         )}
       </div>
 
@@ -1124,7 +1115,189 @@ function ChatWindow({
           {sending ? "…" : "发送"}
         </button>
       </div>
+    </>
+  );
 
+  if (isLearn && learning) {
+    const progressPct = plan?.steps?.length
+      ? Math.round(((stepIndex + (canAdvanceNext ? 1 : nodeTaskDone ? 0.7 : 0.35)) / plan.steps.length) * 100)
+      : 0;
+
+    return (
+      <div className="project-page">
+        <div className="project-topbar card">
+          <div className="project-topbar-left">
+            <button type="button" className="project-back" onClick={onBack}>
+              ← 返回项目
+            </button>
+            <h2>{chat.title}</h2>
+          </div>
+          {headerControls}
+        </div>
+
+        <div className="project-body">
+          <aside className="project-sidebar card">
+            <div className="project-progress-block">
+              <div className="muted small">当前进度</div>
+              <div className="project-progress-meta">
+                {plan
+                  ? `第 ${stepIndex + 1}/${plan.steps.length} 节`
+                  : "尚未生成计划"}
+                {canAdvanceNext && <span className="chip">可进入下一节</span>}
+                {!canAdvanceNext && !listeningDone && <span className="chip chip-warn">听讲中</span>}
+                {!canAdvanceNext && listeningDone && pendingQuiz && (
+                  <span className="chip chip-warn">待完成节点任务</span>
+                )}
+              </div>
+              <div className="project-progress-bar" aria-hidden="true">
+                <span style={{ width: `${Math.min(100, Math.max(0, progressPct))}%` }} />
+              </div>
+              {currentStep && (
+                <div className="project-current-step">
+                  <strong>{currentStep.title}</strong>
+                  <span className="muted small">{currentStep.objective}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="project-info-block">
+              <div className="muted small">项目信息</div>
+              <strong>{learning.topic}</strong>
+              {learning.goal && <p className="muted small">目标：{learning.goal}</p>}
+              {(learning.searchMode || "off") !== "off" && (
+                <p className="muted small">
+                  联网：
+                  {SEARCH_MODES.find((m) => m.id === learning.searchMode)?.label || learning.searchMode}
+                  {learning.searchDone ? " · 已搜" : " · 待搜"}
+                </p>
+              )}
+              {plan?.summary && <p className="small">{plan.summary}</p>}
+              {plan?.partnerAssignments && plan.partnerAssignments.length > 0 && (
+                <p className="muted small">
+                  Partner：
+                  {plan.partnerAssignments
+                    .map((a) => `${charOf(a.characterId)?.name || "?"}（${styleLabel(a.thinkingStyle)}）`)
+                    .join(" · ")}
+                </p>
+              )}
+            </div>
+
+            {learning.searchSources && learning.searchSources.length > 0 && (
+              <div className="project-sources-block">
+                <SourcesBlock sources={learning.searchSources} />
+              </div>
+            )}
+
+            <div className="project-plan-actions">
+              <button type="button" disabled={planBusy || sending} onClick={() => regeneratePlan(false)}>
+                {planBusy
+                  ? learnPlanProgressText(planProgress)
+                  : plan
+                  ? "重新生成计划"
+                  : "生成学习计划"}
+              </button>
+              {(learning.searchMode || "off") !== "off" && (
+                <button type="button" disabled={planBusy || sending} onClick={() => regeneratePlan(true)}>
+                  {planBusy && (planProgress?.phase === "search" || planProgress?.phase === "fetch_urls")
+                    ? learnPlanProgressText(planProgress)
+                    : planBusy
+                    ? "处理中…"
+                    : "重新搜索并生成"}
+                </button>
+              )}
+            </div>
+            {planBusy && planProgress && (
+              <p className="muted small">{learnPlanProgressText(planProgress)}</p>
+            )}
+
+            {plan ? (
+              <>
+                <ol className="learn-steps">
+                  {plan.steps.map((s, i) => {
+                    const locked = i > stepIndex;
+                    return (
+                      <li
+                        key={s.id}
+                        className={
+                          "learn-step" +
+                          (i === stepIndex ? " current" : "") +
+                          (i < stepIndex ? " done" : "") +
+                          (locked ? " locked" : "")
+                        }
+                      >
+                        <div className="learn-step-btn" title={locked ? "完成本节关卡后解锁" : undefined}>
+                          <span className="learn-step-idx">{i + 1}</span>
+                          <span>
+                            <strong>
+                              {s.title}
+                              {locked ? "（未解锁）" : ""}
+                            </strong>
+                            <span className="muted small" style={{ display: "block" }}>
+                              {s.objective}
+                            </span>
+                          </span>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+                <div className="learn-current project-step-nav">
+                  {!chat.messages.some((m) => m.role === "character") && (
+                    <button type="button" disabled={sending || stepBusy} onClick={() => runLearnTurn("manual_start")}>
+                      开始本步
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={!canAdvanceNext}
+                    onClick={() => advanceStep()}
+                    title={advanceBlockReason || "进入下一节"}
+                  >
+                    {stepIndex >= plan.steps.length - 1 ? "已是最后一步" : "进入下一节"}
+                  </button>
+                  {!canAdvanceNext && advanceBlockReason && stepIndex < plan.steps.length - 1 && (
+                    <p className="muted small project-gate-hint">{advanceBlockReason}</p>
+                  )}
+                  {canAdvanceNext && (
+                    <p className="muted small project-gate-hint">本节已听完且节点任务已完成，可以进入下一节</p>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="muted small">还没有学习计划，点上方按钮生成后再开始。</p>
+            )}
+          </aside>
+
+          <main className="project-main card chat-window">
+            <div className="project-main-head">
+              <h3>课堂互动</h3>
+              {speakingId && (
+                <span className={"project-speaking-chip" + (speechPaused ? " paused" : "")}>
+                  {speechPaused ? "讲解已暂停" : "老师讲解中"}
+                </span>
+              )}
+            </div>
+            {messagesPane}
+            <audio ref={audioRef} style={{ display: "none" }} />
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="project-page">
+      <div className="project-topbar card">
+        <div className="project-topbar-left">
+          <button type="button" className="project-back" onClick={onBack}>
+            ← 返回项目
+          </button>
+          <h2>{chat.title}</h2>
+        </div>
+        {headerControls}
+      </div>
+      <div className="card chat-window project-casual-window">{messagesPane}</div>
       <audio ref={audioRef} style={{ display: "none" }} />
     </div>
   );

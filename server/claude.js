@@ -7,6 +7,8 @@
 //    concatenate. This reliably hits a long target length that a single call
 //    would under-deliver on, and keeps each call's output small (no streaming).
 
+import { proxyFetch } from "./http.js";
+
 const SECTION_MINUTES = 5; // 每个环节约 5 分钟
 
 // Read at call time — .env is loaded after this module is imported.
@@ -362,12 +364,71 @@ function priorBlock(episode, limit) {
   );
 }
 
+function isGeminiModel(model) {
+  return String(model || "").toLowerCase().startsWith("gemini");
+}
+
+/** Gemini generateContent path used when episode/chat model is a Gemini id. */
+async function callGeminiJson({ model, system, user, maxTokens }) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY is not set in .env");
+  if (!/^[\x20-\x7E]+$/.test(apiKey)) {
+    throw new Error("GEMINI_API_KEY 看起来还是占位符，请在 .env 填入真实的 Google AI Studio key");
+  }
+  const baseUrl = (process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com").replace(
+    /\/$/,
+    ""
+  );
+  const modelId = model || process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
+  const body = {
+    contents: [{ role: "user", parts: [{ text: user }] }],
+    generationConfig: {
+      temperature: 0.9,
+      maxOutputTokens: Math.min(Math.max(Number(maxTokens) || 8192, 1024), 65536),
+      responseMimeType: "application/json",
+    },
+  };
+  if (system) {
+    body.systemInstruction = { parts: [{ text: system }] };
+  }
+
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(modelId)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Gemini request failed (${res.status}): ${detail.slice(0, 500)}`);
+  }
+
+  const data = await res.json();
+  const text = (data?.candidates?.[0]?.content?.parts || [])
+    .map((p) => p?.text || "")
+    .join("")
+    .trim();
+  if (!text) {
+    throw new Error("Gemini returned no text content: " + JSON.stringify(data).slice(0, 500));
+  }
+  const finish = data?.candidates?.[0]?.finishReason || null;
+  return { json: parseJson(text), text, stopReason: finish };
+}
+
 export async function callClaudeJson({ model, system, user, maxTokens }) {
+  if (isGeminiModel(model)) {
+    return callGeminiJson({ model, system, user, maxTokens });
+  }
+
   const apiKey = process.env.CLAUDE_API_KEY;
   if (!apiKey) throw new Error("CLAUDE_API_KEY is not set in .env");
   const baseUrl = process.env.CLAUDE_BASE_URL || "https://api.apiyi.com";
 
-  const res = await fetch(`${baseUrl}/v1/messages`, {
+  const res = await proxyFetch(`${baseUrl}/v1/messages`, {
     method: "POST",
     headers: {
       "x-api-key": apiKey,

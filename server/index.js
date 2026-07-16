@@ -9,8 +9,17 @@ import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, 
 import { generateChatReplies, generateLearningPlan, generateLearnTurn, generateLearnQuizFollowup, generateLearnAction } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
-import { gatherSearchMaterial, expandMaterialsLinks, collectMaterialUrls, generateRandomCharacter, polishCharacter, polishEpisodeTopic } from "./gemini.js";
+import {
+  gatherSearchMaterial,
+  expandMaterialsLinks,
+  collectMaterialUrls,
+  generateRandomCharacter,
+  polishCharacter,
+  polishEpisodeTopic,
+  runEpisodeFormResearch,
+} from "./gemini.js";
 import { loadCheckpoint, saveCheckpoint, clearCheckpoint } from "./checkpoint.js";
+import { assertCanAdvance, computeAdvanceReady } from "./learnGate.js";
 
 // In-memory generation progress, keyed by episode id (for the poll endpoint).
 const genProgress = new Map();
@@ -19,6 +28,8 @@ const genJobEpoch = new Map();
 /** Learning-plan job progress, keyed by chat id. */
 const learnPlanProgress = new Map();
 const learnPlanJobEpoch = new Map();
+/** Standalone form research jobs (before create / generate), keyed by job id. */
+const researchJobs = new Map();
 /** If a job stops heartbeating for this long, treat as dead and allow a new start. */
 const STALE_MS = 45 * 60 * 1000;
 
@@ -48,6 +59,8 @@ function isProgressStale(p) {
 // Load .env without a dependency (Node has no built-in dotenv loader in ESM).
 const __dirname = dirname(fileURLToPath(import.meta.url));
 await loadEnv(join(__dirname, "..", ".env"));
+const { initHttpProxy } = await import("./http.js");
+initHttpProxy();
 
 const app = express();
 app.use(cors());
@@ -103,7 +116,7 @@ app.post("/api/characters/polish", async (req, res) => {
   }
 });
 
-/** Polish an episode topic the user already wrote (not saved). */
+/** Polish an episode text field the user already wrote (not saved). */
 app.post("/api/episodes/polish-topic", async (req, res) => {
   try {
     const result = await polishEpisodeTopic(req.body || {});
@@ -111,6 +124,63 @@ app.post("/api/episodes/polish-topic", async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: String(e instanceof Error ? e.message : e) });
   }
+});
+
+/**
+ * Standalone research for the episode form.
+ * Returns 202 + jobId; poll GET /api/episodes/research/:jobId.
+ * On done: materials / materialLinks / searchSources / searchDone — create/generate will not re-search.
+ */
+app.post("/api/episodes/research", async (req, res) => {
+  const body = req.body || {};
+  const searchMode = resolveSearchMode(body);
+  if (searchMode === "off") {
+    return res.status(400).json({ error: "请先选择联网搜索模式，再开始调研" });
+  }
+  const jobId = newId("research");
+  const touch = (patch) => {
+    researchJobs.set(jobId, { ...patch, searchMode, updatedAt: new Date().toISOString() });
+  };
+  touch({ phase: "search" });
+  res.status(202).json({ jobId, searchMode });
+
+  (async () => {
+    try {
+      const result = await runEpisodeFormResearch(
+        {
+          title: body.title,
+          topic: body.topic,
+          searchBrief: body.searchBrief,
+          materials: body.materials,
+          materialLinks: body.materialLinks,
+          searchMode,
+          mode: body.mode,
+          storyBackground: body.storyBackground,
+          characterRelations: body.characterRelations,
+          plotDevelopment: body.plotDevelopment,
+        },
+        () => touch({ phase: "search" })
+      );
+      touch({
+        phase: "done",
+        materials: result.materials,
+        materialLinks: result.materialLinks,
+        searchSources: result.searchSources,
+        searchDone: true,
+      });
+    } catch (e) {
+      touch({
+        phase: "error",
+        error: String(e instanceof Error ? e.message : e),
+      });
+    }
+  })();
+});
+
+app.get("/api/episodes/research/:jobId", async (req, res) => {
+  const job = researchJobs.get(req.params.jobId) || null;
+  if (!job) return res.status(404).json({ error: "找不到该调研任务" });
+  res.json(job);
 });
 
 app.post("/api/upload", async (req, res) => {
@@ -254,15 +324,16 @@ app.post("/api/episodes/:id/generate-script", async (req, res) => {
 
   let cp = force ? null : (await loadCheckpoint(episode.id)) || episode.genCheckpoint || null;
 
-  const wantsSearch = searchMode !== "off";
+  // Form-side research already filled materials → do not search again on generate.
+  // Link fetch still runs when materialLinks / materials contain URLs.
+  const alreadyResearched = Boolean(episode.searchDone);
+  const wantsSearch = searchMode !== "off" && !alreadyResearched;
   const hasMaterialUrls =
     collectMaterialUrls(episode.materials || "", episode.materialLinks || "").length > 0;
 
   let initialPhase = "outline";
   if (cp?.outline && cp.nextSectionIndex < (cp.sectionCount || Infinity)) {
     initialPhase = "section";
-  } else if (cp?.searchDone || (cp?.urlsFetched && !wantsSearch)) {
-    initialPhase = "outline";
   } else if (!cp?.urlsFetched && hasMaterialUrls) {
     initialPhase = "fetch_urls";
   } else if (!cp?.searchDone && wantsSearch) {
@@ -293,7 +364,7 @@ app.post("/api/episodes/:id/generate-script", async (req, res) => {
         ? [...episode.searchSources]
         : [];
       let urlsFetched = Boolean(cp?.urlsFetched);
-      let searchDone = Boolean(cp?.searchDone);
+      let searchDone = Boolean(cp?.searchDone) || alreadyResearched;
 
       const persistCp = async (extra = {}) => {
         if (!stillThisJob()) return;
@@ -804,7 +875,7 @@ app.get("/api/chats/:id/learning-plan-progress", async (req, res) => {
   res.json(p);
 });
 
-/** Advance (or jump to) a learning plan step. Adds a system marker; client should call learn-turn. */
+/** Advance to the next learning plan step. Hard-gated: node task must be done; no skip-ahead / go-back. */
 app.post("/api/chats/:id/learning-step", async (req, res) => {
   const chats = await listChats();
   const idx = chats.findIndex((c) => c.id === req.params.id);
@@ -813,6 +884,9 @@ app.post("/api/chats/:id/learning-step", async (req, res) => {
   if (chat.mode !== "learn" || !chat.learning?.plan?.steps?.length) {
     return res.status(400).json({ error: "没有可推进的学习计划" });
   }
+  if (req.body?.listened === false) {
+    return res.status(400).json({ error: "请先听完本节讲解，再进入下一节" });
+  }
   const steps = chat.learning.plan.steps;
   let next;
   if (Number.isFinite(Number(req.body?.stepIndex))) {
@@ -820,6 +894,9 @@ app.post("/api/chats/:id/learning-step", async (req, res) => {
   } else {
     next = Math.min(steps.length - 1, (chat.learning.currentStepIndex || 0) + 1);
   }
+  const gate = assertCanAdvance(chat, next);
+  if (!gate.ok) return res.status(400).json({ error: gate.error });
+
   const prev = chat.learning.currentStepIndex || 0;
   chat.learning.currentStepIndex = next;
   chat.learning.advanceReady = false;
@@ -863,10 +940,11 @@ function toChatMessages(rawReplies) {
 
 function applyLearnMeta(chat, result) {
   if (chat.mode === "learn" && chat.learning) {
+    // Model flag is advisory; unlock only when the current step's node quiz is answered.
     chat.learning = {
       ...chat.learning,
       lastStepStatus: result.stepStatus || null,
-      advanceReady: Boolean(result.advanceReady),
+      advanceReady: computeAdvanceReady(chat),
     };
   }
 }
@@ -909,15 +987,18 @@ app.post("/api/chats/:id/quiz-answer", async (req, res) => {
   const messageId = String(req.body?.messageId || "");
   const skip = Boolean(req.body?.skip);
   const response = String(req.body?.response || "").trim();
+  if (skip) {
+    return res.status(400).json({ error: "节点任务不可跳过，请完成本节测验后再继续" });
+  }
   const quizMsg = chat.messages.find((m) => m.id === messageId && (m.kind === "quiz" || m.quiz));
   if (!quizMsg) return res.status(404).json({ error: "找不到该测验消息" });
   if (quizMsg.quizStatus && quizMsg.quizStatus !== "pending") {
     return res.status(400).json({ error: "该题已作答" });
   }
-  if (!skip && !response) return res.status(400).json({ error: "请作答或跳过" });
+  if (!response) return res.status(400).json({ error: "请完成本节节点任务" });
 
-  quizMsg.quizStatus = skip ? "skipped" : "answered";
-  quizMsg.quizResponse = skip ? "" : response;
+  quizMsg.quizStatus = "answered";
+  quizMsg.quizResponse = response;
 
   const allCharacters = await listCharacters();
   const participants = allCharacters.filter((c) => chat.participantIds.includes(c.id));
@@ -1118,6 +1199,14 @@ function resolveEpisodeMode(body = {}) {
 }
 
 function sanitizeEpisode(body = {}) {
+  const searchSources = Array.isArray(body.searchSources)
+    ? body.searchSources
+        .map((s) => ({
+          title: String(s?.title || s?.url || "").trim(),
+          url: String(s?.url || "").trim(),
+        }))
+        .filter((s) => s.url)
+    : undefined;
   return {
     title: String(body.title || "").trim(),
     mode: resolveEpisodeMode(body),
@@ -1130,6 +1219,8 @@ function sanitizeEpisode(body = {}) {
     model: String(body.model || "claude-sonnet-4-6"),
     searchMode: resolveSearchMode(body),
     searchBrief: String(body.searchBrief || ""),
+    searchDone: Boolean(body.searchDone),
+    ...(searchSources ? { searchSources } : {}),
     basedOnEpisodeIds: Array.isArray(body.basedOnEpisodeIds) ? body.basedOnEpisodeIds.map(String) : [],
     storyBackground: String(body.storyBackground || ""),
     characterRelations: String(body.characterRelations || ""),

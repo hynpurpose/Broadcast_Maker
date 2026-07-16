@@ -8,6 +8,7 @@
 // The key is sent via the x-goog-api-key header (never in the URL).
 
 import { GoogleGenAI } from "@google/genai";
+import { proxyFetch } from "./http.js";
 
 const DEFAULT_BASE = "https://generativelanguage.googleapis.com";
 const MATERIALS_SNIPPET_MAX = 12000;
@@ -33,6 +34,81 @@ function requireApiKey() {
     throw new Error("GEMINI_API_KEY 看起来还是占位符，请在 .env 填入真实的 Google AI Studio key");
   }
   return apiKey;
+}
+
+/** Pull visible text from a generateContent response (skip empty / thought-only parts). */
+function geminiResponseText(data) {
+  const block =
+    data?.promptFeedback?.blockReason ||
+    data?.candidates?.[0]?.finishReason === "SAFETY"
+      ? data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason
+      : "";
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const text = parts
+    .map((p) => (typeof p?.text === "string" ? p.text : ""))
+    .join("")
+    .trim();
+  return { text, blockReason: block || "" };
+}
+
+/** Tolerant JSON parse for model output (fences, leading prose, trailing junk). */
+function parseModelJson(raw) {
+  if (typeof raw !== "string") return null;
+  let s = raw
+    .trim()
+    .replace(/^\uFEFF/, "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  // Some models wrap with full-width braces or smart quotes around keys — normalize a bit.
+  s = s.replace(/^\uFF5B/, "{").replace(/\uFF5D$/, "}");
+  try {
+    return JSON.parse(s);
+  } catch {
+    /* continue */
+  }
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    const slice = s.slice(start, end + 1);
+    try {
+      return JSON.parse(slice);
+    } catch {
+      // Common failure: unescaped newlines / quotes inside string values.
+      try {
+        const repaired = slice
+          .replace(/[\u201C\u201D\u201E\u201F]/g, "“")
+          .replace(/[\u2018\u2019]/g, "’");
+        return JSON.parse(repaired);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/** Pull a string field from messy model JSON/text when JSON.parse fails. */
+function extractJsonStringField(raw, keys) {
+  const s = String(raw || "");
+  for (const key of keys) {
+    if (!key) continue;
+    const re = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "i");
+    const m = s.match(re);
+    if (!m) continue;
+    try {
+      const out = JSON.parse(`"${m[1]}"`);
+      if (String(out || "").trim()) return String(out).trim();
+    } catch {
+      const out = m[1]
+        .replace(/\\n/g, "\n")
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, "\\")
+        .trim();
+      if (out) return out;
+    }
+  }
+  return "";
 }
 
 /**
@@ -182,7 +258,7 @@ export async function expandMaterialsLinks(input) {
     `<成功时：保留关键论点、事实、有代表性的原话；失败时：简短说明原因>\n\n` +
     `不要编造打不开的页面内容。链接列表：\n${list}`;
 
-  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -316,7 +392,7 @@ export async function searchMaterial(prompt) {
   const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
   const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -520,7 +596,7 @@ export async function generateRandomCharacter(opts = {}) {
   const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
   const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
-  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -565,26 +641,91 @@ export async function generateRandomCharacter(opts = {}) {
   };
 }
 
+const EPISODE_POLISH_FIELDS = {
+  topic: {
+    label: "主题",
+    emptyError: "请先填写主题，再进行 AI 润色",
+    role: "节目主题润色助手",
+    rules:
+      `- 只润色「主题」本身，不要输出标题或其它字段\n` +
+      `- 保留用户原意与关键对象，不要换成另一个话题\n` +
+      `- 写得更具体、清晰：最好能看出「聊什么 / 发生什么 + 什么角度或切口」\n` +
+      `- 1～3 句即可，口语自然，不要空泛口号，不要堆砌形容词\n` +
+      `- 不要加「本期我们将讨论」这类套话前缀`,
+  },
+  storyBackground: {
+    label: "故事背景",
+    emptyError: "请先填写故事背景，再进行 AI 润色",
+    role: "情景剧故事背景润色助手",
+    rules:
+      `- 只润色「故事背景」，不要改写人物关系、情节或主题\n` +
+      `- 保留用户原意的时代、地点、世界观与外部情境\n` +
+      `- 写得更具体可感，便于演员进入情境；2～6 句为宜\n` +
+      `- 不要编造与原文冲突的新世界观`,
+  },
+  characterRelations: {
+    label: "人物关系",
+    emptyError: "请先填写人物关系，再进行 AI 润色",
+    role: "情景剧人物关系润色助手",
+    rules:
+      `- 只润色「人物关系」，不要改写故事背景、情节或主题\n` +
+      `- 保留用户设定的关系、矛盾与羁绊，写得更清晰有张力\n` +
+      `- 点明谁与谁、什么关系、潜在冲突；2～6 句为宜\n` +
+      `- 不要无故新增原设定没有的主要人物`,
+  },
+  plotDevelopment: {
+    label: "情节发展",
+    emptyError: "请先填写情节发展，再进行 AI 润色",
+    role: "情景剧情节发展润色助手",
+    rules:
+      `- 只润色「情节发展」，不要改写故事背景、人物关系或主题\n` +
+      `- 保留用户原意的起因 → 冲突 → 转折 → 收束\n` +
+      `- 写得更具体、可拍可演，节奏清楚；不要写成完整对白稿\n` +
+      `- 不要把故事改成另一个剧本`,
+  },
+};
+
 /**
- * Polish / complete a character draft from whatever the user already filled in.
- * Does not touch avatar or voiceId.
- * @param {Record<string, unknown>} draft
- */
-/**
- * Polish an episode topic the user already wrote. Optional title/materials
- * are context only — only `topic` is rewritten.
- * @param {{ topic?: string, title?: string, materials?: string }} draft
+ * Polish one episode text field the user already wrote.
+ * Optional sibling fields / materials are context only.
+ * @param {{
+ *   field?: string,
+ *   topic?: string,
+ *   storyBackground?: string,
+ *   characterRelations?: string,
+ *   plotDevelopment?: string,
+ *   title?: string,
+ *   materials?: string,
+ *   mode?: string,
+ * }} draft
  */
 export async function polishEpisodeTopic(draft = {}) {
-  const topic = String(draft.topic || "").trim();
-  if (!topic) {
-    throw new Error("请先填写主题，再进行 AI 润色");
-  }
+  const field = EPISODE_POLISH_FIELDS[draft.field] ? draft.field : "topic";
+  const meta = EPISODE_POLISH_FIELDS[field];
+  const text = String(draft[field] ?? draft.topic ?? "").trim();
+  if (!text) throw new Error(meta.emptyError);
 
   const title = String(draft.title || "").trim();
   const materials = String(draft.materials || "").trim();
-  const contextLines = [`- 当前主题：${topic}`];
-  if (title) contextLines.push(`- 节目标题（仅供参考，不要改写标题）：${title}`);
+  const mode = draft.mode === "sitcom" ? "sitcom" : "podcast";
+
+  const contextLines = [`- 当前${meta.label}：${text}`];
+  if (title) contextLines.push(`- 节目标题（仅供参考，不要改写）：${title}`);
+  if (mode === "sitcom") {
+    const siblings = [
+      ["storyBackground", "故事背景"],
+      ["characterRelations", "人物关系"],
+      ["plotDevelopment", "情节发展"],
+      ["topic", "本集主题"],
+    ];
+    for (const [key, label] of siblings) {
+      if (key === field) continue;
+      const v = String(draft[key] || "").trim();
+      if (!v) continue;
+      const snip = v.length > 800 ? v.slice(0, 800) + "……" : v;
+      contextLines.push(`- ${label}（仅供参考，不要改写）：${snip}`);
+    }
+  }
   if (materials) {
     const snip =
       materials.length > 1500 ? materials.slice(0, 1500) + "……（已截断）" : materials;
@@ -592,22 +733,19 @@ export async function polishEpisodeTopic(draft = {}) {
   }
 
   const prompt =
-    `你是播客选题润色助手。用户已写下本期节目主题，请在保留核心意图的前提下润色。\n\n` +
+    `你是${meta.role}。用户已写下「${meta.label}」，请在保留核心意图的前提下润色。\n\n` +
     `${contextLines.join("\n")}\n\n` +
     `规则：\n` +
-    `- 只润色「主题」本身，不要输出标题或材料\n` +
-    `- 保留用户原意与关键对象，不要换成另一个话题\n` +
-    `- 写得更具体、清晰，适合播客对谈：最好能看出「聊什么 + 什么角度/争议/切口」\n` +
-    `- 1～3 句即可，口语自然，不要空泛口号，不要堆砌形容词\n` +
-    `- 不要加「本期我们将讨论」这类套话前缀\n\n` +
-    `只输出一个 JSON 对象，不要 markdown 围栏，不要其它说明：\n` +
-    `{"topic":"..."}`;
+    `${meta.rules}\n` +
+    `- text 字段内如需引号，一律用中文全角引号“”或「」，禁止英文半角双引号\n` +
+    `- text 写成一段连续文字；若需换行用 \\n，不要直接插入未转义换行\n\n` +
+    `只输出一个 JSON 对象：{"text":"润色后的内容"}`;
 
   const apiKey = requireApiKey();
   const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
-  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+  const modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
-  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(modelName)}:generateContent`, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -618,6 +756,13 @@ export async function polishEpisodeTopic(draft = {}) {
       generationConfig: {
         temperature: 0.7,
         responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            text: { type: "STRING" },
+          },
+          required: ["text"],
+        },
       },
     }),
   });
@@ -628,21 +773,188 @@ export async function polishEpisodeTopic(draft = {}) {
   }
 
   const data = await res.json();
-  const raw = (data?.candidates?.[0]?.content?.parts || [])
+  const { text: raw, blockReason } = geminiResponseText(data);
+  if (!raw) {
+    throw new Error(
+      blockReason
+        ? `AI 润色被拦截（${blockReason}），请改写原文后再试`
+        : "AI 润色没有返回内容，请稍后重试"
+    );
+  }
+
+  const parsed = parseModelJson(raw);
+  let polished = String(parsed?.text || parsed?.topic || parsed?.[field] || "").trim();
+  if (!polished) {
+    polished = extractJsonStringField(raw, ["text", "topic", field, meta.label]);
+  }
+  // Last resort: model ignored JSON and returned plain prose.
+  if (!polished) {
+    const plain = raw
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+    if (plain && !plain.startsWith("{") && plain.length >= 2) {
+      polished = plain;
+    }
+  }
+  if (!polished) {
+    throw new Error(`AI 润色返回格式异常：${raw.slice(0, 160)}`);
+  }
+  // Keep legacy `topic` key for older clients; also return field + text.
+  return { field, text: polished, topic: field === "topic" ? polished : String(draft.topic || "") };
+}
+
+/**
+ * Turn a Google Search digest into clean「参考材料」bullets for the form field.
+ * @param {string} searchText
+ * @param {{ title?: string, topic?: string, searchBrief?: string }} ctx
+ */
+export async function summarizeSearchToMaterials(searchText, ctx = {}) {
+  const text = String(searchText || "").trim();
+  if (!text) throw new Error("没有可总结的搜索结果");
+
+  const title = String(ctx.title || "").trim();
+  const topic = String(ctx.topic || "").trim();
+  const searchBrief = String(ctx.searchBrief || "").trim();
+  const snip = text.length > 8000 ? text.slice(0, 8000) + "\n……（已截断）" : text;
+
+  const prompt =
+    `你是节目创作助理。下面是联网搜索得到的原始整理，请总结成可直接贴进「参考材料」字段的中文要点。\n\n` +
+    (title ? `节目标题：${title}\n` : "") +
+    (topic ? `主题：${topic}\n` : "") +
+    (searchBrief ? `调研需求：${searchBrief}\n` : "") +
+    `\n搜索结果：\n${snip}\n\n` +
+    `要求：\n` +
+    `- 保留关键事实、数据、争议与可用讨论角度\n` +
+    `- 分条列出，简洁可引用，去掉套话与重复\n` +
+    `- 不要编造搜索结果里没有的信息\n` +
+    `- 用普通中文排版：可用「1. 2. 3.」或「- 」分条；不要用 Markdown（不要 ##、**、\`\`\`）\n` +
+    `- 不要输出 JSON，直接输出参考材料正文`;
+
+  const apiKey = requireApiKey();
+  const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": apiKey,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.4 },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`搜索结果总结失败 (${res.status}): ${detail.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+  const summary = (data?.candidates?.[0]?.content?.parts || [])
     .map((p) => p?.text || "")
     .join("")
     .trim();
+  if (!summary) throw new Error("模型未返回有效的参考材料总结");
+  return summary;
+}
 
-  let parsed;
-  try {
-    parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
-  } catch {
-    throw new Error("模型返回的润色结果无法解析");
+/**
+ * Run standalone research for the episode form (before create / generate).
+ * - google: summarize into materials
+ * - deep_*: full report → materials; source URLs → materialLinks
+ * @param {{
+ *   title?: string, topic?: string, searchBrief?: string, materials?: string,
+ *   materialLinks?: string, searchMode?: string,
+ *   storyBackground?: string, characterRelations?: string, plotDevelopment?: string, mode?: string,
+ * }} draft
+ * @param {(() => void)=} onTick
+ */
+export async function runEpisodeFormResearch(draft = {}, onTick) {
+  const searchMode = draft.searchMode || "google";
+  if (searchMode === "off") {
+    throw new Error("请先选择联网搜索模式，再开始调研");
   }
 
-  const polished = String(parsed.topic || "").trim();
-  if (!polished) throw new Error("模型未返回有效主题");
-  return { topic: polished };
+  const topicForSearch =
+    String(draft.topic || "").trim() ||
+    (draft.mode === "sitcom"
+      ? [draft.plotDevelopment, draft.storyBackground].filter(Boolean).join("\n").trim()
+      : "");
+
+  const found = await gatherSearchMaterial(
+    {
+      title: draft.title,
+      topic: topicForSearch,
+      searchBrief: draft.searchBrief,
+      materials: draft.materials,
+    },
+    searchMode,
+    onTick
+  );
+
+  const existingMaterials = String(draft.materials || "").trim();
+  const existingLinks = String(draft.materialLinks || "").trim();
+  const sources = Array.isArray(found.sources) ? found.sources : [];
+  let materials = existingMaterials;
+  let materialLinks = existingLinks;
+
+  if (searchMode === "google") {
+    const summary = await summarizeSearchToMaterials(found.text, {
+      title: draft.title,
+      topic: topicForSearch,
+      searchBrief: draft.searchBrief,
+    });
+    const block = `【联网搜索资料】\n${summary}`;
+    if (!existingMaterials) {
+      materials = block;
+    } else if (/【联网搜索资料】/.test(existingMaterials) || /##\s*联网搜索资料/.test(existingMaterials)) {
+      const cleaned = existingMaterials
+        .replace(/##\s*联网搜索资料摘要[\s\S]*?(?=\n## |\n【|$)/, "")
+        .replace(/【联网搜索资料】[\s\S]*?(?=\n【|$)/, "")
+        .trim();
+      materials = cleaned ? `${cleaned}\n\n${block}` : block;
+    } else {
+      materials = `${existingMaterials}\n\n${block}`;
+    }
+  } else {
+    const heading = found.heading || SEARCH_HEADINGS[searchMode] || "Deep Research 调研报告";
+    const plainHeading = heading.replace(/^#+\s*/, "");
+    const block = `【${plainHeading}】\n${found.text}`;
+    materials = existingMaterials
+      ? existingMaterials.includes(`【${plainHeading}】`) || existingMaterials.includes(`## ${heading}`)
+        ? existingMaterials
+        : `${existingMaterials}\n\n${block}`
+      : block;
+
+    const linkLines = existingLinks
+      ? existingLinks.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+      : [];
+    const seen = new Set(linkLines);
+    for (const s of sources) {
+      const url = String(s?.url || "").trim();
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      linkLines.push(url);
+    }
+    // Also pull any URLs embedded in the report text.
+    for (const url of extractUrlsFromText(found.text)) {
+      if (seen.has(url)) continue;
+      seen.add(url);
+      linkLines.push(url);
+    }
+    materialLinks = linkLines.join("\n");
+  }
+
+  return {
+    materials,
+    materialLinks,
+    searchSources: sources,
+    searchDone: true,
+    heading: found.heading || null,
+  };
 }
 
 export async function polishCharacter(draft = {}) {
@@ -703,7 +1015,7 @@ export async function polishCharacter(draft = {}) {
   const baseUrl = (process.env.GEMINI_BASE_URL || DEFAULT_BASE).replace(/\/$/, "");
   const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
-  const res = await fetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+  const res = await proxyFetch(`${baseUrl}/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,

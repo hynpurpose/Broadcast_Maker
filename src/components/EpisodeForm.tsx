@@ -1,8 +1,16 @@
-import { useEffect, useState } from "react";
-import type { Character, Episode, EpisodeDraft, EpisodeMode, SearchMode } from "../types";
+import { useEffect, useRef, useState } from "react";
+import type {
+  Character,
+  Episode,
+  EpisodeDraft,
+  EpisodeMode,
+  EpisodePolishField,
+  SearchMode,
+} from "../types";
 import { EPISODE_MODES, DEFAULT_MODE, SCRIPT_MODELS, DEFAULT_MODEL, SEARCH_MODES, DEFAULT_SEARCH_MODE } from "../constants";
 import { api } from "../api";
 import { Select } from "./Select";
+import { MaterialsField } from "./MaterialsField";
 
 const EMPTY: EpisodeDraft = {
   title: "",
@@ -16,6 +24,8 @@ const EMPTY: EpisodeDraft = {
   model: DEFAULT_MODEL,
   searchMode: DEFAULT_SEARCH_MODE,
   searchBrief: "",
+  searchDone: false,
+  searchSources: [],
   basedOnEpisodeIds: [],
   storyBackground: "",
   characterRelations: "",
@@ -43,8 +53,18 @@ export function EpisodeForm({
   onCancel: () => void;
 }) {
   const [draft, setDraft] = useState<EpisodeDraft>(EMPTY);
-  const [polishing, setPolishing] = useState(false);
+  const [polishingField, setPolishingField] = useState<EpisodePolishField | null>(null);
   const [polishError, setPolishError] = useState<string | null>(null);
+  const [researching, setResearching] = useState(false);
+  const [researchError, setResearchError] = useState<string | null>(null);
+  const [researchHint, setResearchHint] = useState<string | null>(null);
+  const researchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (researchPollRef.current) clearInterval(researchPollRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (editing) {
@@ -61,6 +81,8 @@ export function EpisodeForm({
         model: model || DEFAULT_MODEL,
         searchMode: resolveSearchMode(editing),
         searchBrief: editing.searchBrief || "",
+        searchDone: Boolean(editing.searchDone),
+        searchSources: editing.searchSources || [],
         basedOnEpisodeIds: editing.basedOnEpisodeIds || [],
         storyBackground: editing.storyBackground || "",
         characterRelations: editing.characterRelations || "",
@@ -71,6 +93,9 @@ export function EpisodeForm({
     } else {
       setDraft(EMPTY);
     }
+    setPolishError(null);
+    setResearchError(null);
+    setResearchHint(null);
   }, [editing]);
 
   function toggleBasedOn(id: string) {
@@ -82,7 +107,6 @@ export function EpisodeForm({
     }));
   }
 
-  // Episodes that already have a script and aren't the one being edited.
   const priorOptions = episodes.filter((e) => e.script && e.id !== editing?.id);
 
   function set<K extends keyof EpisodeDraft>(key: K, value: EpisodeDraft[K]) {
@@ -107,30 +131,122 @@ export function EpisodeForm({
 
   const isSitcom = draft.mode === "sitcom";
 
-  async function handlePolishTopic() {
+  async function handlePolish(field: EpisodePolishField) {
+    const value = String(draft[field] || "").trim();
+    if (!value) return;
     setPolishError(null);
-    setPolishing(true);
+    setPolishingField(field);
     try {
       const result = await api.polishTopic({
-        topic: isSitcom ? draft.plotDevelopment || draft.topic : draft.topic,
+        field,
+        topic: draft.topic,
+        storyBackground: draft.storyBackground,
+        characterRelations: draft.characterRelations,
+        plotDevelopment: draft.plotDevelopment,
         title: draft.title,
         materials: draft.materials,
+        mode: draft.mode,
       });
-      if (isSitcom) {
-        set("plotDevelopment", result.topic);
-      } else {
-        set("topic", result.topic);
-      }
+      set(field, result.text);
     } catch (e) {
       setPolishError(String(e instanceof Error ? e.message : e));
     } finally {
-      setPolishing(false);
+      setPolishingField(null);
     }
   }
 
-  const polishSource = isSitcom ? draft.plotDevelopment : draft.topic;
-  const canPolishTopic = !polishing && Boolean(polishSource.trim());
+  function canPolish(field: EpisodePolishField) {
+    return !polishingField && !researching && Boolean(String(draft[field] || "").trim());
+  }
+
+  function researchLabel() {
+    if (!researching) {
+      return draft.searchDone ? "重新调研" : "开始调研";
+    }
+    if (draft.searchMode === "deep_research_max") return "Deep Research Max 调研中…";
+    if (draft.searchMode === "deep_research") return "Deep Research 调研中…";
+    return "搜索并总结中…";
+  }
+
+  async function handleResearch() {
+    if (draft.searchMode === "off" || researching) return;
+    setResearchError(null);
+    setResearchHint(null);
+    setResearching(true);
+    try {
+      const { jobId } = await api.startResearch({
+        title: draft.title,
+        topic: draft.topic,
+        searchBrief: draft.searchBrief,
+        materials: draft.materials,
+        materialLinks: draft.materialLinks,
+        searchMode: draft.searchMode,
+        mode: draft.mode,
+        storyBackground: draft.storyBackground,
+        characterRelations: draft.characterRelations,
+        plotDevelopment: draft.plotDevelopment,
+      });
+
+      if (researchPollRef.current) clearInterval(researchPollRef.current);
+      await new Promise<void>((resolve, reject) => {
+        const tick = async () => {
+          try {
+            const p = await api.getResearchProgress(jobId);
+            if (p.phase === "done") {
+              if (researchPollRef.current) clearInterval(researchPollRef.current);
+              researchPollRef.current = null;
+              setDraft((d) => ({
+                ...d,
+                materials: p.materials ?? d.materials,
+                materialLinks: p.materialLinks ?? d.materialLinks,
+                searchSources: p.searchSources || [],
+                searchDone: true,
+              }));
+              const isDeep =
+                draft.searchMode === "deep_research" || draft.searchMode === "deep_research_max";
+              setResearchHint(
+                isDeep
+                  ? "调研完成：报告已写入参考材料，链接已写入参考链接。创建/生成时不会再重新搜索。"
+                  : "调研完成：搜索结果已总结进参考材料。创建/生成时不会再重新搜索。"
+              );
+              resolve();
+            } else if (p.phase === "error") {
+              if (researchPollRef.current) clearInterval(researchPollRef.current);
+              researchPollRef.current = null;
+              reject(new Error(p.error || "调研失败"));
+            }
+          } catch (e) {
+            if (researchPollRef.current) clearInterval(researchPollRef.current);
+            researchPollRef.current = null;
+            reject(e);
+          }
+        };
+        void tick();
+        researchPollRef.current = setInterval(tick, 2000);
+      });
+    } catch (e) {
+      setResearchError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setResearching(false);
+    }
+  }
+
   const estWords = draft.durationMinutes * 300;
+
+  function PolishButton({ field, title }: { field: EpisodePolishField; title: string }) {
+    const busy = polishingField === field;
+    return (
+      <button
+        type="button"
+        className={"ai-polish compact" + (busy ? " loading" : "")}
+        onClick={() => handlePolish(field)}
+        disabled={!canPolish(field)}
+        title={title}
+      >
+        {busy ? "润色中…" : "AI 润色"}
+      </button>
+    );
+  }
 
   return (
     <form
@@ -143,6 +259,8 @@ export function EpisodeForm({
       <h2>{editing ? "编辑节目" : "新建节目"}</h2>
 
       {polishError && <p className="error">⚠ {polishError}</p>}
+      {researchError && <p className="error">⚠ {researchError}</p>}
+      {researchHint && <p className="muted small">{researchHint}</p>}
 
       <label>
         节目模式
@@ -162,57 +280,85 @@ export function EpisodeForm({
         联网搜索（生成前用 Gemini 搜资料，作为创作素材）
         <Select
           value={draft.searchMode}
-          onChange={(val) => set("searchMode", val as SearchMode)}
+          onChange={(val) => {
+            const mode = val as SearchMode;
+            setDraft((d) => ({
+              ...d,
+              searchMode: mode,
+              // Changing mode invalidates prior research for generate-skip purposes.
+              searchDone: mode === "off" ? false : d.searchDone && mode === d.searchMode,
+            }));
+            setResearchHint(null);
+          }}
           options={SEARCH_MODES.map((m) => ({ value: m.id, label: m.label }))}
         />
       </label>
 
       {draft.searchMode !== "off" && (
-        <label>
-          调研需求（可选，写清想查什么、关注角度、时效等）
-          <textarea
-            value={draft.searchBrief}
-            onChange={(e) => set("searchBrief", e.target.value)}
-            rows={2}
-            placeholder="例：重点查近一年进展、主要争议、对普通人的影响；不要只堆技术参数"
-          />
-        </label>
+        <>
+          <label>
+            调研需求（可选，写清想查什么、关注角度、时效等）
+            <textarea
+              value={draft.searchBrief}
+              onChange={(e) => set("searchBrief", e.target.value)}
+              rows={2}
+              placeholder="例：重点查近一年进展、主要争议、对普通人的影响；不要只堆技术参数"
+            />
+          </label>
+          <div className="research-actions">
+            <button
+              type="button"
+              className="primary"
+              onClick={handleResearch}
+              disabled={researching || Boolean(polishingField)}
+            >
+              {researchLabel()}
+            </button>
+            {draft.searchDone && (
+              <span className="muted small">已调研 · 创建后生成脚本时不会再重新搜索</span>
+            )}
+          </div>
+        </>
       )}
 
       {isSitcom ? (
         <>
-          <label>
-            故事背景
+          <div className="field-block">
+            <div className="field-head">
+              <span>故事背景</span>
+              <PolishButton field="storyBackground" title="润色已写好的故事背景（保留原意，写得更具体）" />
+            </div>
             <textarea
               value={draft.storyBackground}
-              onChange={(e) => set("storyBackground", e.target.value)}
+              onChange={(e) => {
+                set("storyBackground", e.target.value);
+                if (polishError) setPolishError(null);
+              }}
               rows={3}
               placeholder="时代、地点、世界观、外部情境……"
             />
-          </label>
+          </div>
 
-          <label>
-            人物关系
+          <div className="field-block">
+            <div className="field-head">
+              <span>人物关系</span>
+              <PolishButton field="characterRelations" title="润色已写好的人物关系（保留原意，写得更清楚）" />
+            </div>
             <textarea
               value={draft.characterRelations}
-              onChange={(e) => set("characterRelations", e.target.value)}
+              onChange={(e) => {
+                set("characterRelations", e.target.value);
+                if (polishError) setPolishError(null);
+              }}
               rows={3}
               placeholder="谁和谁是什么关系、矛盾点、羁绊……"
             />
-          </label>
+          </div>
 
           <div className="field-block">
             <div className="field-head">
               <span>情节发展</span>
-              <button
-                type="button"
-                className={"ai-polish compact" + (polishing ? " loading" : "")}
-                onClick={handlePolishTopic}
-                disabled={!canPolishTopic}
-                title="润色已写好的情节（保留原意，写得更具体）"
-              >
-                {polishing ? "润色中…" : "AI 润色"}
-              </button>
+              <PolishButton field="plotDevelopment" title="润色已写好的情节（保留原意，写得更具体）" />
             </div>
             <textarea
               value={draft.plotDevelopment}
@@ -225,29 +371,27 @@ export function EpisodeForm({
             />
           </div>
 
-          <label>
-            本集主题（可选，一句话概括）
+          <div className="field-block">
+            <div className="field-head">
+              <span>本集主题（可选，一句话概括）</span>
+              <PolishButton field="topic" title="润色已写好的本集主题（保留原意，写得更具体）" />
+            </div>
             <textarea
               value={draft.topic}
-              onChange={(e) => set("topic", e.target.value)}
+              onChange={(e) => {
+                set("topic", e.target.value);
+                if (polishError) setPolishError(null);
+              }}
               rows={2}
               placeholder="例：旧友重逢后的一次试探与和解"
             />
-          </label>
+          </div>
         </>
       ) : (
         <div className="field-block">
           <div className="field-head">
             <span>主题</span>
-            <button
-              type="button"
-              className={"ai-polish compact" + (polishing ? " loading" : "")}
-              onClick={handlePolishTopic}
-              disabled={!canPolishTopic}
-              title="润色已写好的主题（保留原意，写得更具体）"
-            >
-              {polishing ? "润色中…" : "AI 润色"}
-            </button>
+            <PolishButton field="topic" title="润色已写好的主题（保留原意，写得更具体）" />
           </div>
           <textarea
             value={draft.topic}
@@ -261,11 +405,12 @@ export function EpisodeForm({
         </div>
       )}
 
-      <label>
-        参考材料（文字要点、数据、观点等）
-        <textarea value={draft.materials} onChange={(e) => set("materials", e.target.value)} rows={4}
-          placeholder="粘贴要点、数据、事实、观点素材……" />
-      </label>
+      <MaterialsField
+        value={draft.materials}
+        onChange={(v) => set("materials", v)}
+        rows={6}
+        placeholder="粘贴要点、数据、事实、观点素材……也可点上方「开始调研」自动填入"
+      />
 
       <label>
         参考链接（每行一个，写稿前自动抓取正文）
@@ -282,8 +427,11 @@ export function EpisodeForm({
           <legend>基于往期节目（延续/呼应，可多选）</legend>
           {priorOptions.map((e) => (
             <label key={e.id} className="checkbox">
-              <input type="checkbox" checked={draft.basedOnEpisodeIds.includes(e.id)}
-                onChange={() => toggleBasedOn(e.id)} />
+              <input
+                type="checkbox"
+                checked={draft.basedOnEpisodeIds.includes(e.id)}
+                onChange={() => toggleBasedOn(e.id)}
+              />
               {e.title || "（未命名）"}
               {(e.mode || "podcast") === "sitcom" ? " · 情景剧" : ""}
             </label>
@@ -294,8 +442,13 @@ export function EpisodeForm({
       <div className="row">
         <label className="narrow">
           时长（分钟）
-          <input type="number" min={1} max={120} value={draft.durationMinutes}
-            onChange={(e) => set("durationMinutes", Math.max(1, Number(e.target.value) || 1))} />
+          <input
+            type="number"
+            min={1}
+            max={120}
+            value={draft.durationMinutes}
+            onChange={(e) => set("durationMinutes", Math.max(1, Number(e.target.value) || 1))}
+          />
         </label>
         <div className="grow est">≈ {estWords} 字</div>
       </div>
@@ -353,9 +506,12 @@ export function EpisodeForm({
             <div className="guest-grid">
               {characters.map((c) => (
                 <label key={c.id} className="checkbox" data-disabled={c.id === draft.hostId}>
-                  <input type="checkbox" checked={draft.guestIds.includes(c.id)}
+                  <input
+                    type="checkbox"
+                    checked={draft.guestIds.includes(c.id)}
                     disabled={c.id === draft.hostId}
-                    onChange={() => toggleGuest(c.id)} />
+                    onChange={() => toggleGuest(c.id)}
+                  />
                   {c.name}
                   {c.id === draft.hostId && <span className="muted small">（已是主持人）</span>}
                 </label>
@@ -375,8 +531,14 @@ export function EpisodeForm({
       </label>
 
       <div className="actions end">
-        {editing && <button type="button" onClick={onCancel}>取消</button>}
-        <button type="submit" className="primary wide">{editing ? "保存" : "创建"}</button>
+        {editing && (
+          <button type="button" onClick={onCancel}>
+            取消
+          </button>
+        )}
+        <button type="submit" className="primary wide" disabled={researching || Boolean(polishingField)}>
+          {editing ? "保存" : "创建"}
+        </button>
       </div>
     </form>
   );

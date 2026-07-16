@@ -45,6 +45,7 @@ export const DEFAULT_PARTNER_STYLES = [
 export const SCRIPT_MODELS = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6（快、便宜）" },
   { id: "claude-opus-4-8", label: "Claude Opus 4.8（更强、更生动）" },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash（快、便宜）" },
 ] as const;
 
 export const DEFAULT_MODEL = SCRIPT_MODELS[0].id;

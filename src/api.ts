@@ -1,4 +1,19 @@
-import type { Character, CharacterDraft, Chat, ChatDraft, ChatMessage, Episode, EpisodeDraft, GenProgress, LearnPlanProgress, LearningPlan } from "./types";
+import type {
+  Character,
+  CharacterDraft,
+  Chat,
+  ChatDraft,
+  ChatMessage,
+  Episode,
+  EpisodeDraft,
+  EpisodeMode,
+  EpisodePolishField,
+  GenProgress,
+  LearnPlanProgress,
+  LearningPlan,
+  ResearchJobProgress,
+  SearchMode,
+} from "./types";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
@@ -85,7 +100,16 @@ export const api = {
       };
     }),
 
-  polishTopic: (draft: { topic: string; title?: string; materials?: string }) =>
+  polishTopic: (draft: {
+    field?: EpisodePolishField;
+    topic?: string;
+    storyBackground?: string;
+    characterRelations?: string;
+    plotDevelopment?: string;
+    title?: string;
+    materials?: string;
+    mode?: EpisodeMode;
+  }) =>
     fetch("/api/episodes/polish-topic", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -93,7 +117,26 @@ export const api = {
     }).then(async (r) => {
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
-      return body as { topic: string };
+      return body as { field: string; text: string; topic: string };
+    }),
+
+  /** Start standalone form research; poll getResearchProgress until done/error. */
+  startResearch: (draft: Partial<EpisodeDraft> & { mode?: EpisodeMode }) =>
+    fetch("/api/episodes/research", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as { jobId: string; searchMode: SearchMode };
+    }),
+
+  getResearchProgress: (jobId: string) =>
+    fetch(`/api/episodes/research/${jobId}`).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as ResearchJobProgress;
     }),
 
   listEpisodes: () => fetch("/api/episodes").then((r) => json<Episode[]>(r)),
@@ -208,11 +251,14 @@ export const api = {
     }
   },
 
-  advanceLearningStep: (id: string, stepIndex?: number) =>
+  advanceLearningStep: (id: string, opts?: { stepIndex?: number; listened?: boolean }) =>
     fetch(`/api/chats/${id}/learning-step`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(stepIndex === undefined ? {} : { stepIndex }),
+      body: JSON.stringify({
+        ...(opts?.stepIndex === undefined ? {} : { stepIndex: opts.stepIndex }),
+        listened: opts?.listened !== false,
+      }),
     }).then((r) => json<Chat>(r)),
 
   /** Start or continue a learning turn (teacher opens the step). */

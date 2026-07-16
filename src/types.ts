@@ -81,13 +81,15 @@ export interface Episode {
   durationMinutes: number;
   hostId: string;
   guestIds: string[];
-  /** 写稿模型 id，如 claude-sonnet-4-6 / claude-opus-4-8 */
+  /** 写稿模型 id，如 claude-sonnet-4-6 / claude-opus-4-8 / gemini-3.5-flash */
   model: string;
   /** 生成前联网搜索模式 */
   searchMode: SearchMode;
   /** 可选：联网/深研时想查清什么、关注角度等 */
   searchBrief: string;
   searchSources?: SearchSource[];
+  /** 表单侧已完成独立调研；为 true 时生成脚本不再重新搜索 */
+  searchDone?: boolean;
   /** 未完成的生成检查点（有则可续跑） */
   genCheckpoint?: GenCheckpoint | null;
   /** 基于哪些往期节目的内容来延续创作 */
@@ -273,6 +275,8 @@ export type EpisodeDraft = Pick<
   | "model"
   | "searchMode"
   | "searchBrief"
+  | "searchDone"
+  | "searchSources"
   | "basedOnEpisodeIds"
   | "storyBackground"
   | "characterRelations"
@@ -280,3 +284,20 @@ export type EpisodeDraft = Pick<
   | "leadActorIds"
   | "plotDevelopment"
 >;
+
+export type EpisodePolishField =
+  | "topic"
+  | "storyBackground"
+  | "characterRelations"
+  | "plotDevelopment";
+
+export type ResearchJobProgress = {
+  phase: "search" | "done" | "error";
+  searchMode?: SearchMode;
+  error?: string;
+  materials?: string;
+  materialLinks?: string;
+  searchSources?: SearchSource[];
+  searchDone?: boolean;
+  updatedAt?: string;
+};
