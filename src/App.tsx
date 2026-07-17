@@ -6,9 +6,10 @@ import { TtsTester } from "./components/TtsTester";
 import { RandomCharacter } from "./components/RandomCharacter";
 import { EpisodesPanel } from "./components/EpisodesPanel";
 import { ChatsPanel } from "./components/ChatsPanel";
+import { ReadingsPanel } from "./components/ReadingsPanel";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 
-type Tab = "characters" | "episodes" | "chats";
+type Tab = "characters" | "episodes" | "chats" | "readings";
 
 export function App() {
   const [tab, setTab] = useState<Tab>("characters");
@@ -66,6 +67,9 @@ export function App() {
           </button>
           <button className={tab === "chats" ? "tab active" : "tab"} onClick={() => setTab("chats")}>
             对话
+          </button>
+          <button className={tab === "readings" ? "tab active" : "tab"} onClick={() => setTab("readings")}>
+            精读
           </button>
         </nav>
       </header>
@@ -155,8 +159,10 @@ export function App() {
         </div>
       ) : tab === "episodes" ? (
         <EpisodesPanel characters={characters} />
-      ) : (
+      ) : tab === "chats" ? (
         <ChatsPanel characters={characters} />
+      ) : (
+        <ReadingsPanel characters={characters} />
       )}
 
       {pendingDelete && (

@@ -5,10 +5,11 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import express from "express";
 import cors from "cors";
-import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, saveChats, newId, AUDIO_DIR, DATA_DIR } from "./store.js";
+import { listCharacters, saveCharacters, listEpisodes, saveEpisodes, listChats, saveChats, listReadings, saveReadings, updateReadings, newId, AUDIO_DIR, DATA_DIR } from "./store.js";
 import { generateChatReplies, generateLearningPlan, generateLearnTurn, generateLearnQuizFollowup, generateLearnAction } from "./chat.js";
 import { synthesize } from "./fish.js";
 import { generateEpisodeScript } from "./claude.js";
+import { extractArticleFromUrl, generateReadingScript } from "./reading.js";
 import {
   gatherSearchMaterial,
   expandMaterialsLinks,
@@ -30,6 +31,9 @@ const learnPlanProgress = new Map();
 const learnPlanJobEpoch = new Map();
 /** Standalone form research jobs (before create / generate), keyed by job id. */
 const researchJobs = new Map();
+/** Reading (article intensive) generation progress, keyed by reading id. */
+const readingGenProgress = new Map();
+const readingGenJobEpoch = new Map();
 /** If a job stops heartbeating for this long, treat as dead and allow a new start. */
 const STALE_MS = 45 * 60 * 1000;
 
@@ -46,6 +50,12 @@ function touchProgress(id, patch) {
 function touchLearnPlanProgress(id, patch) {
   const next = { ...patch, updatedAt: new Date().toISOString() };
   learnPlanProgress.set(id, next);
+  return next;
+}
+
+function touchReadingProgress(id, patch) {
+  const next = { ...patch, updatedAt: new Date().toISOString() };
+  readingGenProgress.set(id, next);
   return next;
 }
 
@@ -602,6 +612,171 @@ app.get("/api/episodes/:id/export", async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: String(err.message || err) });
   }
+});
+
+// --- Readings: article intensive reading projects ---
+app.get("/api/readings", async (_req, res) => {
+  const readings = await listReadings();
+  res.json(readings);
+});
+
+app.post("/api/readings/extract", async (req, res) => {
+  try {
+    const result = await extractArticleFromUrl(req.body?.url);
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ error: String(err.message || err) });
+  }
+});
+
+app.post("/api/readings", async (req, res) => {
+  const readings = await listReadings();
+  const now = new Date().toISOString();
+  const reading = {
+    id: newId("r"),
+    ...sanitizeReading(req.body),
+    status: "draft",
+    paragraphs: null,
+    script: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  readings.push(reading);
+  await saveReadings(readings);
+  res.status(201).json(reading);
+});
+
+app.put("/api/readings/:id", async (req, res) => {
+  const readings = await listReadings();
+  const idx = readings.findIndex((r) => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  readings[idx] = {
+    ...readings[idx],
+    ...sanitizeReading(req.body),
+    id: req.params.id,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveReadings(readings);
+  res.json(readings[idx]);
+});
+
+app.delete("/api/readings/:id", async (req, res) => {
+  const readings = await listReadings();
+  await saveReadings(readings.filter((r) => r.id !== req.params.id));
+  readingGenProgress.delete(req.params.id);
+  res.status(204).end();
+});
+
+app.post("/api/readings/:id/generate", async (req, res) => {
+  const readings = await listReadings();
+  const idx = readings.findIndex((r) => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  let reading = readings[idx];
+  const force = Boolean(req.body?.force);
+
+  const running = readingGenProgress.get(reading.id);
+  if (isActivePhase(running?.phase)) {
+    const age = Date.now() - new Date(running.updatedAt || 0).getTime();
+    if (age < STALE_MS && !force) {
+      return res.status(409).json({ busy: true, progress: running });
+    }
+  }
+
+  if (force) {
+    reading = {
+      ...reading,
+      status: "draft",
+      paragraphs: null,
+      script: null,
+      updatedAt: new Date().toISOString(),
+    };
+    readings[idx] = reading;
+    await saveReadings(readings);
+  }
+
+  const epoch = (readingGenJobEpoch.get(reading.id) || 0) + 1;
+  readingGenJobEpoch.set(reading.id, epoch);
+  touchReadingProgress(reading.id, { phase: "split", message: "正在按意群拆段…" });
+  res.status(202).json({ started: true });
+
+  (async () => {
+    const stillCurrent = () => readingGenJobEpoch.get(reading.id) === epoch;
+    try {
+      const characters = await listCharacters();
+      const { paragraphs, script } = await generateReadingScript(reading, characters, async (p) => {
+        if (!stillCurrent()) return;
+        const { paragraphs: paras, partialScript, ...rest } = p || {};
+        touchReadingProgress(reading.id, rest);
+
+        if (Array.isArray(paras) || partialScript) {
+          try {
+            await updateReadings((list) => {
+              const i = list.findIndex((r) => r.id === reading.id);
+              if (i === -1) return;
+              if (Array.isArray(paras)) list[i].paragraphs = paras;
+              if (partialScript?.segments?.length) {
+                list[i].script = {
+                  title: partialScript.title || list[i].title,
+                  segments: partialScript.segments,
+                };
+                list[i].status = "draft";
+              }
+              list[i].updatedAt = new Date().toISOString();
+            });
+          } catch (e) {
+            console.warn("[reading] mid-save failed:", e?.message || e);
+          }
+        }
+      });
+      if (!stillCurrent()) return;
+
+      await updateReadings((list) => {
+        const i = list.findIndex((r) => r.id === reading.id);
+        if (i === -1) {
+          touchReadingProgress(reading.id, { phase: "error", error: "精读项目已被删除" });
+          return;
+        }
+        list[i] = {
+          ...list[i],
+          title: script.title || list[i].title,
+          paragraphs,
+          script,
+          status: "script_ready",
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      touchReadingProgress(reading.id, { phase: "done", message: "精读稿已生成" });
+    } catch (err) {
+      if (!stillCurrent()) return;
+      touchReadingProgress(reading.id, {
+        phase: "error",
+        error: String(err.message || err),
+        message: String(err.message || err),
+      });
+    }
+  })();
+});
+
+app.get("/api/readings/:id/gen-progress", (req, res) => {
+  res.json(readingGenProgress.get(req.params.id) || null);
+});
+
+app.put("/api/readings/:id/segments/:index", async (req, res) => {
+  const readings = await listReadings();
+  const idx = readings.findIndex((r) => r.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "not found" });
+  const reading = readings[idx];
+  const segIndex = Number(req.params.index);
+  const segments = reading.script?.segments;
+  if (!Array.isArray(segments) || !segments[segIndex]) {
+    return res.status(404).json({ error: "segment not found" });
+  }
+  const seg = segments[segIndex];
+  if (typeof req.body?.text === "string") seg.text = req.body.text;
+  if (typeof req.body?.emotion === "string") seg.emotion = req.body.emotion;
+  reading.updatedAt = new Date().toISOString();
+  await saveReadings(readings);
+  res.json(reading);
 });
 
 // --- Chats: real-time multi-character conversations ---
@@ -1227,6 +1402,19 @@ function sanitizeEpisode(body = {}) {
     narratorId: String(body.narratorId || ""),
     leadActorIds: Array.isArray(body.leadActorIds) ? body.leadActorIds.map(String) : [],
     plotDevelopment: String(body.plotDevelopment || ""),
+  };
+}
+
+function sanitizeReading(body = {}) {
+  return {
+    title: String(body.title || "").trim(),
+    articleText: String(body.articleText || ""),
+    articleUrl: String(body.articleUrl || "").trim(),
+    articleLanguage: String(body.articleLanguage || "en").trim() || "en",
+    readerId: String(body.readerId || ""),
+    explainerId: String(body.explainerId || ""),
+    explainerLanguage: String(body.explainerLanguage || body.articleLanguage || "zh").trim() || "zh",
+    model: String(body.model || "claude-sonnet-4-6"),
   };
 }
 

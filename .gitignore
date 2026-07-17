@@ -6,5 +6,7 @@ server/data/audio/
 server/data/gen-checkpoints/
 server/data/episodes.json
 server/data/chats.json
+server/data/readings.json
+server/data/readings.json.corrupt-bak
 *.log
 .DS_Store

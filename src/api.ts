@@ -11,6 +11,9 @@ import type {
   GenProgress,
   LearnPlanProgress,
   LearningPlan,
+  Reading,
+  ReadingDraft,
+  ReadingGenProgress,
   ResearchJobProgress,
   SearchMode,
 } from "./types";
@@ -197,6 +200,73 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
     }).then((r) => json<Episode>(r)),
+
+  listReadings: () => fetch("/api/readings").then((r) => json<Reading[]>(r)),
+
+  createReading: (draft: ReadingDraft) =>
+    fetch("/api/readings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    }).then((r) => json<Reading>(r)),
+
+  updateReading: (id: string, draft: ReadingDraft) =>
+    fetch(`/api/readings/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    }).then((r) => json<Reading>(r)),
+
+  deleteReading: (id: string) =>
+    fetch(`/api/readings/${id}`, { method: "DELETE" }).then((r) => {
+      if (!r.ok) throw new Error(r.statusText);
+    }),
+
+  extractReadingArticle: (url: string) =>
+    fetch("/api/readings/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    }).then(async (r) => {
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((body as { error?: string }).error || r.statusText);
+      return body as { title: string; articleText: string };
+    }),
+
+  startReadingGenerate: async (id: string, opts: { force?: boolean } = {}) => {
+    const r = await fetch(`/api/readings/${id}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    const body = await r.json().catch(() => ({} as Record<string, unknown>));
+    if (r.status === 409 && (body as { busy?: boolean })?.busy) {
+      return {
+        busy: true as const,
+        progress: ((body as { progress?: ReadingGenProgress }).progress ||
+          null) as ReadingGenProgress | null,
+      };
+    }
+    if (!r.ok) {
+      const err = (body as { error?: string })?.error;
+      throw new Error(err || "启动精读生成失败");
+    }
+    return {
+      busy: false as const,
+      started: true as const,
+      progress: null as ReadingGenProgress | null,
+    };
+  },
+
+  getReadingGenProgress: (id: string) =>
+    fetch(`/api/readings/${id}/gen-progress`).then((r) => json<ReadingGenProgress | null>(r)),
+
+  updateReadingSegment: (id: string, index: number, patch: { text?: string; emotion?: string }) =>
+    fetch(`/api/readings/${id}/segments/${index}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => json<Reading>(r)),
 
   listChats: () => fetch("/api/chats").then((r) => json<Chat[]>(r)),
 

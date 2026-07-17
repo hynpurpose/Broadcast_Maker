@@ -58,3 +58,18 @@ export const SEARCH_MODES = [
 ] as const;
 
 export const DEFAULT_SEARCH_MODE = SEARCH_MODES[0].id;
+
+export const READING_LANGUAGES = [
+  { id: "zh", label: "中文" },
+  { id: "en", label: "英语" },
+  { id: "de", label: "德语" },
+  { id: "ja", label: "日语" },
+  { id: "fr", label: "法语" },
+  { id: "es", label: "西班牙语" },
+  { id: "ko", label: "韩语" },
+  { id: "it", label: "意大利语" },
+  { id: "pt", label: "葡萄牙语" },
+  { id: "ru", label: "俄语" },
+] as const;
+
+export const DEFAULT_READING_LANGUAGE = READING_LANGUAGES[1].id;

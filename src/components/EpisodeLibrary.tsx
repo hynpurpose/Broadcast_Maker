@@ -1,5 +1,4 @@
 import type { Episode, SearchMode } from "../types";
-import { SEARCH_MODES } from "../constants";
 
 function episodeSearchMode(e: Episode & { searchEnabled?: boolean }): SearchMode {
   if (e.searchMode) return e.searchMode;
@@ -8,9 +7,9 @@ function episodeSearchMode(e: Episode & { searchEnabled?: boolean }): SearchMode
 
 function searchBadge(mode: SearchMode): string | null {
   if (mode === "off") return null;
-  if (mode === "google") return "🌐 Google Search";
-  if (mode === "deep_research") return "🔬 Deep Research";
-  return "🔬 Deep Research Max";
+  if (mode === "google") return "Google Search";
+  if (mode === "deep_research") return "Deep Research";
+  return "Deep Research Max";
 }
 
 function hasResumableCheckpoint(e: Episode | null): boolean {
@@ -47,10 +46,8 @@ export function EpisodeLibrary({
   return (
     <div className="ep-deck">
       <div className="ep-deck-head">
-        <div className="ep-deck-title">LIBRARY</div>
-        <div className="ep-deck-count">
-          {episodes.length} EPISODES
-        </div>
+        <div className="ep-deck-title">节目库</div>
+        <div className="ep-deck-count">{episodes.length} 期</div>
       </div>
       {episodes.length === 0 && (
         <p className="ep-deck-empty">还没有节目，先在左侧新建一期。</p>
@@ -75,50 +72,15 @@ export function EpisodeLibrary({
               }
               onClick={() => onSelect(e.id)}
             >
-              <div
-                className={"ep-badge " + (isReady ? "ready" : "draft")}
-                title={`时长 ${e.durationMinutes} 分钟（刻度满值 120 分钟）`}
-              >
-                <div className="ep-gauge">
-                  <svg className="ep-gauge-svg" viewBox="0 0 64 64" aria-hidden="true">
-                    <circle className="ep-gauge-track" cx="32" cy="32" r="26" />
-                    {Array.from({ length: 12 }, (_, i) => {
-                      const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
-                      const x1 = 32 + Math.cos(a) * 22.5;
-                      const y1 = 32 + Math.sin(a) * 22.5;
-                      const x2 = 32 + Math.cos(a) * 26.5;
-                      const y2 = 32 + Math.sin(a) * 26.5;
-                      return (
-                        <line
-                          key={i}
-                          className="ep-gauge-tick"
-                          x1={x1}
-                          y1={y1}
-                          x2={x2}
-                          y2={y2}
-                        />
-                      );
-                    })}
-                    <circle
-                      className="ep-gauge-progress"
-                      cx="32"
-                      cy="32"
-                      r="26"
-                      pathLength={100}
-                      strokeDasharray={`${Math.min(100, Math.max(0, (e.durationMinutes / 120) * 100))} 100`}
-                    />
-                  </svg>
-                  <div className="ep-badge-well">
-                    <span className="ep-badge-duration">{e.durationMinutes}</span>
-                    <span className="ep-badge-unit">MIN</span>
-                  </div>
-                </div>
+              <div className="ep-duration" title={`时长 ${e.durationMinutes} 分钟`}>
+                <span className="ep-duration-value">{e.durationMinutes}</span>
+                <span className="ep-duration-unit">分钟</span>
               </div>
 
               <div className="ep-info">
                 <div className="ep-info-top">
                   <span className={"ep-card-status " + (isReady ? "ready" : "draft")}>
-                    {isReady ? "READY" : "DRAFT"}
+                    {isReady ? "就绪" : "草稿"}
                   </span>
                   <h3 className="ep-title">{e.title || "（未命名节目）"}</h3>
                 </div>
@@ -147,18 +109,10 @@ export function EpisodeLibrary({
               </div>
 
               <div className="ep-actions" onClick={(ev) => ev.stopPropagation()}>
-                <button
-                  type="button"
-                  className={"ep-key" + (isSelected ? " active" : "")}
-                  onClick={() => onEdit(e)}
-                >
+                <button type="button" className="ghost" onClick={() => onEdit(e)}>
                   编辑
                 </button>
-                <button
-                  type="button"
-                  className="ep-key ep-key-danger"
-                  onClick={() => onDelete(e.id)}
-                >
+                <button type="button" className="danger" onClick={() => onDelete(e.id)}>
                   删除
                 </button>
               </div>

@@ -301,3 +301,54 @@ export type ResearchJobProgress = {
   searchDone?: boolean;
   updatedAt?: string;
 };
+
+/** 文章精读项目 */
+export type ReadingStatus = "draft" | "script_ready";
+
+export interface ReadingParagraph {
+  index: number;
+  text: string;
+}
+
+export interface Reading {
+  id: string;
+  title: string;
+  articleText: string;
+  articleUrl: string;
+  /** 文章语言，如 zh / en / de / ja / fr / es */
+  articleLanguage: string;
+  /** 朗读者：台词使用文章语言 */
+  readerId: string;
+  /** 讲解者 */
+  explainerId: string;
+  /** 讲解语言，可与文章语言不同 */
+  explainerLanguage: string;
+  model: string;
+  status: ReadingStatus;
+  paragraphs: ReadingParagraph[] | null;
+  script: Script | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ReadingDraft = Pick<
+  Reading,
+  | "title"
+  | "articleText"
+  | "articleUrl"
+  | "articleLanguage"
+  | "readerId"
+  | "explainerId"
+  | "explainerLanguage"
+  | "model"
+>;
+
+export interface ReadingGenProgress {
+  phase: "split" | "script" | "done" | "error";
+  current?: number;
+  total?: number;
+  error?: string;
+  /** human-readable status for UI */
+  message?: string;
+  updatedAt?: string;
+}
